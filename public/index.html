@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lucid</title>
+    <link rel="icon" type="image/png" href="lucid-logo.png">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/exifr/dist/lite.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+    <div id="splashScreen" class="splash-screen">
+        <div class="splash-content">
+            <img src="lucid-logo.png" alt="Lucid" class="splash-logo">
+            <div class="splash-text">Lucid</div>
+            <div class="splash-bar"><div class="splash-bar-fill"></div></div>
+        </div>
+    </div>
+    <div class="app-container">
+        <header class="header-bar">
+            <div class="header-left">
+                <div class="logo">
+                    <img src="lucid-logo.png" alt="Lucid" class="logo-img">
+                    <div class="logo-text">
+                        <h1>Lucid</h1>
+                        <span class="logo-byline">by notalex.sh</span>
+                    </div>
+                </div>
+                <div class="header-divider"></div>
+                <div class="header-dropdown">
+                    <button class="header-dropdown-trigger" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+                            <polyline points="13 2 13 9 20 9"/>
+                        </svg>
+                        <span>File</span>
+                        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="header-dropdown-menu">
+                        <label for="imageUpload" class="dropdown-item">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            <span class="dropdown-label">Open File</span>
+                            <input type="file" id="imageUpload" accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.tiff,.tif,.heic,.heif">
+                        </label>
+                        <button id="pasteBtn" class="dropdown-item" type="button" title="Paste from clipboard">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                            <span class="dropdown-label">Paste Image</span>
+                            <kbd>Ctrl+V</kbd>
+                        </button>
+                        <div class="dropdown-divider"></div>
+                        <button id="resetBtn" class="dropdown-item" type="button" title="Reset all">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                            </svg>
+                            <span class="dropdown-label">Reset All</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="header-dropdown">
+                    <button class="header-dropdown-trigger" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                            <circle cx="12" cy="12" r="3"/>
+                        </svg>
+                        <span>View</span>
+                        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="header-dropdown-menu">
+                        <button id="toggleAnnotations" class="dropdown-item toggle-item" type="button" title="Toggle Annotations (A)">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <path d="M8 12h8M12 8v8"/>
+                            </svg>
+                            <span class="dropdown-label">Annotations</span>
+                            <kbd>A</kbd>
+                            <span class="toggle-indicator"></span>
+                        </button>
+                        <button id="toggleMagnifier" class="dropdown-item toggle-item" type="button" title="Toggle Magnifier (M)">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/>
+                                <path d="M21 21l-4.35-4.35"/>
+                            </svg>
+                            <span class="dropdown-label">Magnifier</span>
+                            <kbd>M</kbd>
+                            <span class="toggle-indicator"></span>
+                        </button>
+                        <button id="togglePicker" class="dropdown-item toggle-item" type="button" title="Color Picker (P)">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+                            </svg>
+                            <span class="dropdown-label">Color Picker</span>
+                            <kbd>P</kbd>
+                            <span class="toggle-indicator"></span>
+                        </button>
+                        <div class="dropdown-divider"></div>
+                        <button id="toggleSidebar" class="dropdown-item toggle-item" type="button" title="Toggle Sidebar">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="15" y1="3" x2="15" y2="21"/>
+                            </svg>
+                            <span class="dropdown-label">Sidebar Panel</span>
+                            <span class="toggle-indicator"></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="header-center">
+                <div class="header-url-group">
+                    <input type="url" id="imageUrlInput" placeholder="Paste image URL..." class="header-url-input">
+                    <button id="fetchUrlBtn" class="header-btn" type="button" title="Load image from URL">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                        </svg>
+                        <span>URL</span>
+                    </button>
+                </div>
+            </div>
+            <div class="header-right">
+                <button id="copyBtn" class="header-btn" type="button" title="Copy to clipboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                    </svg>
+                </button>
+                <button id="exportBtn" class="header-btn primary" type="button" title="Export image">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    <span>EXPORT</span>
+                </button>
+                <div class="header-divider"></div>
+                <div id="thumbnailContainer" class="thumbnail-container">
+                    <canvas id="thumbnailCanvas"></canvas>
+                </div>
+                <span id="imageInfo">NO IMAGE</span>
+                <button id="helpBtn" class="header-btn help-btn" type="button" title="Help &amp; Instructions">?</button>
+            </div>
+        </header>
+
+        <div class="main-layout">
+            <div class="control-panel">
+                <div class="tab-nav">
+                    <button class="tab-btn active" data-tab="enhance">ENHANCE</button>
+                    <button class="tab-btn" data-tab="transform">TRANSFORM</button>
+                    <button class="tab-btn" data-tab="magnify">MAGNIFY</button>
+                    <button class="tab-btn" data-tab="annotate">ANNOTATE</button>
+                    <button class="tab-btn" data-tab="osint">OSINT</button>
+                    <button class="tab-btn" data-tab="exif">METADATA</button>
+                </div>
+
+                <div class="tab-panels">
+                    <div id="enhance" class="tab-panel active">
+                        <div class="panel-section">
+                            <h3>AUTO ENHANCE</h3>
+                            <p class="section-hint">Quick presets for common enhancement needs</p>
+                            <div class="button-grid">
+                                <button class="preset-btn" data-preset="auto">AUTO</button>
+                                <button class="preset-btn" data-preset="lowlight">LOW LIGHT</button>
+                                <button class="preset-btn" data-preset="forensic">FORENSIC</button>
+                                <button class="preset-btn" data-preset="clarity">CLARITY</button>
+                                <button class="preset-btn" data-preset="vivid">VIVID</button>
+                                <button class="preset-btn" data-preset="muted">MUTED</button>
+                            </div>
+                            <button class="section-reset-btn" id="resetPreset">RESET</button>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>BASIC</h3>
+                            <div class="section-body">
+                                <div class="control-row">
+                                    <label>BRIGHTNESS</label>
+                                    <input type="range" id="brightness" min="-100" max="100" value="0">
+                                    <span class="value">0</span>
+                                </div>
+                                <div class="control-row">
+                                    <label>CONTRAST</label>
+                                    <input type="range" id="contrast" min="-100" max="100" value="0">
+                                    <span class="value">0</span>
+                                </div>
+                                <div class="control-row">
+                                    <label>SATURATION</label>
+                                    <input type="range" id="saturation" min="-100" max="100" value="0">
+                                    <span class="value">0</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel-section collapsible" id="advancedSection">
+                            <h3 class="collapsible-header" id="advancedToggle">
+                                <span>ADVANCED</span>
+                                <span class="expand-hint">click to expand</span>
+                                <span class="collapse-icon">+</span>
+                            </h3>
+                            <div class="collapsible-body" id="advancedBody">
+                                <div class="panel-subsection" id="sectionAdjustments">
+                                    <h4>
+                                        <label class="section-toggle">
+                                            <input type="checkbox" id="toggleAdjustments" checked>
+                                            <span>ADJUSTMENTS</span>
+                                        </label>
+                                    </h4>
+                                    <div class="section-body">
+                                        <div class="control-row">
+                                            <label>SHARPEN</label>
+                                            <input type="range" id="sharpen" min="0" max="100" value="0">
+                                            <span class="value">0</span>
+                                        </div>
+                                        <div class="control-row">
+                                            <label>GAMMA</label>
+                                            <input type="range" id="gamma" min="20" max="500" value="100" step="1">
+                                            <span class="value">1.00</span>
+                                        </div>
+                                        <button class="section-reset-btn" id="resetAdjustments">RESET</button>
+                                    </div>
+                                </div>
+
+                                <div class="panel-subsection" id="sectionColorBalance">
+                                    <h4>
+                                        <label class="section-toggle">
+                                            <input type="checkbox" id="toggleColorBalance" checked>
+                                            <span>COLOR BALANCE</span>
+                                        </label>
+                                    </h4>
+                                    <div class="section-body">
+                                        <div class="control-row">
+                                            <label>RED</label>
+                                            <input type="range" id="balanceR" min="-100" max="100" value="0">
+                                            <span class="value">0</span>
+                                        </div>
+                                        <div class="control-row">
+                                            <label>GREEN</label>
+                                            <input type="range" id="balanceG" min="-100" max="100" value="0">
+                                            <span class="value">0</span>
+                                        </div>
+                                        <div class="control-row">
+                                            <label>BLUE</label>
+                                            <input type="range" id="balanceB" min="-100" max="100" value="0">
+                                            <span class="value">0</span>
+                                        </div>
+                                        <button class="section-reset-btn" id="resetColorBalance">RESET</button>
+                                    </div>
+                                </div>
+
+                                <div class="panel-subsection" id="sectionCurves">
+                                    <h4>
+                                        <label class="section-toggle">
+                                            <input type="checkbox" id="toggleCurves" checked>
+                                            <span>CURVES</span>
+                                        </label>
+                                    </h4>
+                                    <div class="section-body">
+                                        <div class="curves-container">
+                                            <canvas id="curvesCanvas" width="256" height="256"></canvas>
+                                        </div>
+                                        <p class="curves-hint">Click to add points. Drag to adjust. Double-click to remove.</p>
+                                        <button class="section-reset-btn" id="resetCurves">RESET</button>
+                                    </div>
+                                </div>
+
+                                <div class="panel-subsection">
+                                    <h4>FILTERS</h4>
+                                    <div class="button-grid">
+                                        <button class="filter-btn" data-filter="grayscale">GRAY</button>
+                                        <button class="filter-btn" data-filter="invert">INVERT</button>
+                                        <button class="filter-btn" data-filter="edge">EDGES</button>
+                                        <button class="filter-btn" data-filter="emboss">EMBOSS</button>
+                                        <button class="filter-btn" data-filter="histogram">EQUALIZE</button>
+                                        <button class="filter-btn" data-filter="noise">DENOISE</button>
+                                    </div>
+                                    <button class="section-reset-btn" id="resetFilters">RESET</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>HISTOGRAM</h3>
+                            <canvas id="histogramCanvas" width="256" height="100"></canvas>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>COLOR PALETTE</h3>
+                            <div id="colorPalette" class="color-palette">
+                                <p class="no-data">No image loaded</p>
+                            </div>
+                        </div>
+
+                        <button id="resetEnhancements" class="panel-btn">RESET ALL</button>
+                    </div>
+
+                    <div id="transform" class="tab-panel">
+                        <div class="panel-section">
+                            <h3>TRANSFORM</h3>
+                            <div class="control-row">
+                                <label>ZOOM</label>
+                                <input type="range" id="zoomLevel" min="10" max="500" value="100">
+                                <span class="value">100%</span>
+                            </div>
+                            <div class="control-row">
+                                <label>ROTATE</label>
+                                <input type="range" id="rotateAngle" min="-180" max="180" value="0">
+                                <span class="value">0°</span>
+                            </div>
+                            <div class="button-grid">
+                                <button class="filter-btn" id="rotate90">90° CW</button>
+                                <button class="filter-btn" id="rotate-90">90° CCW</button>
+                                <button class="filter-btn" id="flipH">FLIP H</button>
+                                <button class="filter-btn" id="flipV">FLIP V</button>
+                            </div>
+                            <button class="section-reset-btn" id="resetTransform">RESET</button>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>CROP</h3>
+                            <div class="crop-instructions">
+                                <p class="instruction-step"><span class="step-num">1</span> Click CROP MODE to enter selection</p>
+                                <p class="instruction-step"><span class="step-num">2</span> Click and drag on the image to select the area you want to keep</p>
+                                <p class="instruction-step"><span class="step-num">3</span> Click APPLY CROP to finalize</p>
+                            </div>
+                            <button class="filter-btn" id="cropBtn" style="width: 100%; margin-top: 8px;">CROP MODE</button>
+                        </div>
+                    </div>
+
+                    <div id="magnify" class="tab-panel">
+                        <div id="magnifierHiddenWarning" class="hidden-warning" style="display: none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                                <line x1="1" y1="1" x2="23" y2="23"/>
+                            </svg>
+                            <span>MAGNIFIER IS HIDDEN - Press M or click toggle to show</span>
+                        </div>
+                        <div class="panel-section">
+                            <h3>MAGNIFIER</h3>
+                            <div class="control-row">
+                                <label>ZOOM</label>
+                                <input type="range" id="magLevel" min="2" max="5" value="3">
+                                <span class="value">3x</span>
+                            </div>
+                            <div class="control-row">
+                                <label>SIZE</label>
+                                <input type="range" id="magSize" min="100" max="300" value="150">
+                                <span class="value">150</span>
+                            </div>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>ENHANCEMENT</h3>
+                            <select id="magEnhance" class="select-input">
+                                <option value="none">NONE</option>
+                                <option value="autoContrast">AUTO CONTRAST</option>
+                                <option value="channelContrast">CHANNEL CONTRAST</option>
+                                <option value="normalize">NORMALIZE</option>
+                                <option value="sharpen">SHARPEN</option>
+                                <option value="edge">EDGE DETECT</option>
+                            </select>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>OPTIONS</h3>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="magGrid">
+                                <span>SHOW GRID</span>
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="magPixelInfo" checked>
+                                <span>PIXEL INFO</span>
+                            </label>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="magCrosshair" checked>
+                                <span>CROSSHAIR</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div id="annotate" class="tab-panel">
+                        <div id="annotationsHiddenWarning" class="hidden-warning" style="display: none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/>
+                                <line x1="1" y1="1" x2="23" y2="23"/>
+                            </svg>
+                            <span>ANNOTATIONS ARE HIDDEN - Press A or click toggle to show</span>
+                        </div>
+                        <div class="panel-section">
+                            <h3>TOOLS</h3>
+                            <div class="button-grid">
+                                <button class="tool-btn" data-tool="rect">RECT</button>
+                                <button class="tool-btn" data-tool="circle">CIRCLE</button>
+                                <button class="tool-btn" data-tool="arrow">ARROW</button>
+                                <button class="tool-btn" data-tool="line">LINE</button>
+                                <button class="tool-btn" data-tool="text">TEXT</button>
+                                <button class="tool-btn" data-tool="blur">BLUR</button>
+                                <button class="tool-btn" data-tool="measure">MEASURE</button>
+                                <button class="tool-btn" data-tool="colorpicker">PICKER</button>
+                            </div>
+                        </div>
+
+                        <div class="panel-section" id="colorPickerResult" style="display:none;">
+                            <h3>PICKED COLOR</h3>
+                            <div class="picker-result">
+                                <div id="pickerSwatch" class="picker-swatch"></div>
+                                <div class="picker-values">
+                                    <div id="pickerRGB" class="picker-value"></div>
+                                    <div id="pickerHEX" class="picker-value"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="panel-section" id="shapeSettings">
+                            <h3>SHAPE SETTINGS</h3>
+                            <div class="control-row">
+                                <label>COLOR</label>
+                                <input type="color" id="annotationColor" value="#ff0000">
+                            </div>
+                            <div class="control-row" id="lineWidthRow">
+                                <label>WIDTH</label>
+                                <input type="range" id="lineWidth" min="1" max="10" value="2">
+                                <span class="value">2</span>
+                            </div>
+                            <div class="control-row" id="fillModeRow">
+                                <label>FILL</label>
+                                <select id="fillMode" class="select-input">
+                                    <option value="outline">OUTLINE</option>
+                                    <option value="filled">FILLED</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="panel-section" id="textSettings" style="display:none;">
+                            <h3>TEXT SETTINGS</h3>
+                            <div class="control-row">
+                                <label>COLOR</label>
+                                <input type="color" id="textColor" value="#ff0000">
+                            </div>
+                            <div class="control-row">
+                                <label>TEXT</label>
+                                <input type="text" id="annotationText" placeholder="Enter text...">
+                            </div>
+                            <div class="control-row">
+                                <label>SIZE</label>
+                                <input type="range" id="textSize" min="12" max="72" value="16">
+                                <span class="value">16px</span>
+                            </div>
+                            <div class="control-row">
+                                <label>WEIGHT</label>
+                                <select id="textWeight" class="select-input">
+                                    <option value="normal">NORMAL</option>
+                                    <option value="bold">BOLD</option>
+                                </select>
+                            </div>
+                            <div class="control-row">
+                                <label>FONT</label>
+                                <select id="textFont" class="select-input">
+                                    <option value="monospace">MONOSPACE</option>
+                                    <option value="sans-serif">SANS-SERIF</option>
+                                    <option value="serif">SERIF</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="panel-section" id="blurSettings" style="display:none;">
+                            <h3>BLUR SETTINGS</h3>
+                            <div class="control-row">
+                                <label>STRENGTH</label>
+                                <input type="range" id="blurStrength" min="5" max="50" value="20">
+                                <span class="value">20</span>
+                            </div>
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="blurGradient">
+                                <span>GRADIENT EDGE</span>
+                            </label>
+                            <p class="section-hint">Gradient creates a smooth feathered edge</p>
+                        </div>
+
+                        <div class="panel-section" id="measureSettings" style="display:none;">
+                            <h3>MEASUREMENT</h3>
+                            <p class="section-hint">Click and drag between two points to measure pixel distance</p>
+                            <div id="measureResult" class="measure-result" style="display:none;">
+                                <div class="measure-row"><span class="measure-label">DISTANCE</span><span id="measureDistance" class="measure-value">0 px</span></div>
+                                <div class="measure-row"><span class="measure-label">DX</span><span id="measureDx" class="measure-value">0 px</span></div>
+                                <div class="measure-row"><span class="measure-label">DY</span><span id="measureDy" class="measure-value">0 px</span></div>
+                                <div class="measure-row"><span class="measure-label">ANGLE</span><span id="measureAngle" class="measure-value">0°</span></div>
+                            </div>
+                        </div>
+
+                        <button id="undoAnnotation" class="panel-btn">UNDO ANNOTATION</button>
+                        <button id="clearAnnotations" class="panel-btn" style="margin-bottom: 20px;">CLEAR ANNOTATIONS</button>
+
+                        <div class="panel-section collapsible" id="watermarkSection">
+                            <h3 class="collapsible-header" id="watermarkToggle">
+                                <span>WATERMARK</span>
+                                <span class="expand-hint">click to expand</span>
+                                <span class="collapse-icon">+</span>
+                            </h3>
+                            <div class="collapsible-body">
+                                <div class="control-row">
+                                    <label>TEXT</label>
+                                    <input type="text" id="watermarkText" placeholder="Enter watermark..." class="text-input">
+                                </div>
+                                <div class="control-row">
+                                    <label>SIZE</label>
+                                    <input type="range" id="watermarkSize" min="12" max="72" value="24">
+                                    <span class="value">24px</span>
+                                </div>
+                                <div class="control-row">
+                                    <label>OPACITY</label>
+                                    <input type="range" id="watermarkOpacity" min="10" max="100" value="30">
+                                    <span class="value">30%</span>
+                                </div>
+                                <div class="control-row">
+                                    <label>COLOR</label>
+                                    <input type="color" id="watermarkColor" value="#ffffff">
+                                </div>
+                                <div class="control-row">
+                                    <label>POSITION</label>
+                                    <select id="watermarkPosition" class="select-input">
+                                        <option value="center">CENTER</option>
+                                        <option value="bottomRight">BOTTOM RIGHT</option>
+                                        <option value="bottomLeft">BOTTOM LEFT</option>
+                                        <option value="topRight">TOP RIGHT</option>
+                                        <option value="topLeft">TOP LEFT</option>
+                                        <option value="tile">TILE (REPEAT)</option>
+                                    </select>
+                                </div>
+                                <div class="control-row">
+                                    <label>ANGLE</label>
+                                    <input type="range" id="watermarkAngle" min="-45" max="45" value="-30">
+                                    <span class="value">-30°</span>
+                                </div>
+                                <button id="applyWatermark" class="panel-btn primary">APPLY</button>
+                                <button id="removeWatermark" class="panel-btn">REMOVE</button>
+                            </div>
+                        </div>
+
+                        <div class="panel-section collapsible" id="captionSection">
+                            <h3 class="collapsible-header" id="captionToggle">
+                                <span>CAPTION</span>
+                                <span class="expand-hint">click to expand</span>
+                                <span class="collapse-icon">+</span>
+                            </h3>
+                            <div class="collapsible-body">
+                                <div class="control-row">
+                                    <label>TEXT</label>
+                                    <input type="text" id="captionText" placeholder="Enter caption..." class="text-input">
+                                </div>
+                                <div class="control-row">
+                                    <label>POSITION</label>
+                                    <select id="captionPosition" class="select-input">
+                                        <option value="bottom">BOTTOM</option>
+                                        <option value="top">TOP</option>
+                                    </select>
+                                </div>
+                                <div class="control-row">
+                                    <label>HEIGHT</label>
+                                    <input type="range" id="captionHeight" min="30" max="100" value="50">
+                                    <span class="value">50px</span>
+                                </div>
+                                <div class="control-row">
+                                    <label>TEXT SIZE</label>
+                                    <input type="range" id="captionSize" min="12" max="36" value="16">
+                                    <span class="value">16px</span>
+                                </div>
+                                <div class="control-row">
+                                    <label>BG COLOR</label>
+                                    <input type="color" id="captionBgColor" value="#000000">
+                                </div>
+                                <div class="control-row">
+                                    <label>TEXT COLOR</label>
+                                    <input type="color" id="captionTextColor" value="#ffffff">
+                                </div>
+                                <button id="applyCaption" class="panel-btn primary">APPLY</button>
+                                <button id="removeCaption" class="panel-btn">REMOVE</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="osint" class="tab-panel">
+                        <div class="panel-section">
+                            <h3>REVERSE IMAGE SEARCH</h3>
+                            <p class="section-hint">Copies the image to your clipboard and opens the search engine — just paste (Ctrl+V) or use the upload button on the page</p>
+                            <div class="osint-buttons">
+                                <button class="osint-btn" id="searchGoogle" title="Search with Google Lens">
+                                    <span class="osint-icon">G</span>
+                                    <span>Google Lens</span>
+                                </button>
+                                <button class="osint-btn" id="searchYandex" title="Search with Yandex Images">
+                                    <span class="osint-icon">Y</span>
+                                    <span>Yandex Images</span>
+                                </button>
+                                <button class="osint-btn" id="searchTineye" title="Search with TinEye">
+                                    <span class="osint-icon">T</span>
+                                    <span>TinEye</span>
+                                </button>
+                                <button class="osint-btn" id="searchBing" title="Search with Bing Visual Search">
+                                    <span class="osint-icon">B</span>
+                                    <span>Bing Visual Search</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>OCR — TEXT EXTRACTION</h3>
+                            <p class="section-hint">Extract text from the image using Tesseract.js. Works entirely in-browser — nothing is uploaded.</p>
+                            <div class="ocr-controls">
+                                <div class="control-row">
+                                    <label>LANGUAGE</label>
+                                    <select id="ocrLanguage" class="select-input">
+                                        <option value="eng">ENGLISH</option>
+                                        <option value="fra">FRENCH</option>
+                                        <option value="deu">GERMAN</option>
+                                        <option value="spa">SPANISH</option>
+                                        <option value="por">PORTUGUESE</option>
+                                        <option value="ita">ITALIAN</option>
+                                        <option value="nld">DUTCH</option>
+                                        <option value="pol">POLISH</option>
+                                        <option value="rus">RUSSIAN</option>
+                                        <option value="ara">ARABIC</option>
+                                        <option value="hin">HINDI</option>
+                                        <option value="jpn">JAPANESE</option>
+                                        <option value="kor">KOREAN</option>
+                                        <option value="chi_sim">CHINESE (SIMPLIFIED)</option>
+                                        <option value="chi_tra">CHINESE (TRADITIONAL)</option>
+                                    </select>
+                                </div>
+                                <button id="runOcr" class="panel-btn primary">EXTRACT TEXT</button>
+                                <div id="ocrProgress" class="ocr-progress" style="display:none;">
+                                    <div class="ocr-progress-bar"><div id="ocrProgressFill" class="ocr-progress-fill"></div></div>
+                                    <span id="ocrProgressText" class="ocr-progress-text">Initializing...</span>
+                                </div>
+                                <div id="ocrResult" class="ocr-result" style="display:none;">
+                                    <div class="ocr-result-header">
+                                        <span>EXTRACTED TEXT</span>
+                                        <button id="copyOcrText" class="ocr-copy-btn" title="Copy to clipboard">COPY</button>
+                                    </div>
+                                    <pre id="ocrText" class="ocr-text"></pre>
+                                    <div id="ocrConfidence" class="ocr-confidence"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="exif" class="tab-panel">
+                        <div class="panel-section">
+                            <h3>METADATA</h3>
+                            <div id="exifContent" class="exif-content">
+                                <p class="no-data">No image loaded</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="canvas-area">
+                <div class="canvas-wrapper">
+                    <canvas id="mainCanvas"></canvas>
+                    <canvas id="annotationCanvas"></canvas>
+                    <canvas id="overlayCanvas"></canvas>
+                    <canvas id="magnifierCanvas"></canvas>
+                    <div id="pixelInfo" class="pixel-info"></div>
+                </div>
+
+                <div class="status-bar">
+                    <div class="status-left">
+                        <span id="mouseCoords">X: 0 Y: 0</span>
+                        <span id="pixelValue">RGB: 0,0,0</span>
+                        <span id="pickedColor" class="picked-color" style="display:none;">
+                            <span id="pickedSwatch" class="picked-swatch"></span>
+                            <span id="pickedHex"></span>
+                        </span>
+                    </div>
+                    <div class="status-right">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="helpModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content help-modal">
+            <div class="modal-header">
+                <h2>Lucid - Help</h2>
+                <button id="closeHelp" class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="help-section">
+                    <h3>KEYBOARD SHORTCUTS</h3>
+                    <div class="help-grid">
+                        <span><kbd>A</kbd></span><span>Toggle Annotations</span>
+                        <span><kbd>M</kbd></span><span>Toggle Magnifier</span>
+                        <span><kbd>P</kbd></span><span>Color Picker</span>
+                        <span><kbd>SPACE</kbd></span><span>Pan (hold and drag)</span>
+                        <span><kbd>Ctrl+Z</kbd></span><span>Undo</span>
+                        <span><kbd>Ctrl+V</kbd></span><span>Paste Image</span>
+                        <span><kbd>Scroll</kbd></span><span>Zoom In/Out</span>
+                    </div>
+                </div>
+                <div class="help-section">
+                    <h3>ENHANCE TAB</h3>
+                    <p>Use presets for quick adjustments or manually adjust brightness, contrast, saturation, and other parameters. The Advanced section contains sharpen, gamma, and color balance controls. Use the Curves editor for precise tonal adjustments.</p>
+                </div>
+                <div class="help-section">
+                    <h3>TRANSFORM TAB</h3>
+                    <p>Zoom, rotate, flip, and crop your image. Use the Crop Mode button to select a region, then click Apply Crop to cut. Filters like Edge Detection, Emboss, and Histogram Equalization are also here.</p>
+                </div>
+                <div class="help-section">
+                    <h3>ANNOTATE TAB</h3>
+                    <p>Draw shapes (rectangles, circles, arrows, lines), add text labels, or blur sensitive areas. Watermark and Caption tools add overlays to your image. Use Undo to remove the last annotation.</p>
+                </div>
+                <div class="help-section">
+                    <h3>INFO TAB</h3>
+                    <p>View file metadata including EXIF data, camera info, GPS location (if available), and file hash for verification.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="screenSizeWarning" class="screen-size-warning">
+        <div class="warning-content">
+            <div class="warning-icon">!</div>
+            <h2>Screen Too Small</h2>
+            <p>Lucid requires a minimum screen width of 1024px for optimal functionality.</p>
+            <p class="current-size">Current width: <span id="currentWidth"></span>px</p>
+            <p class="suggestion">Please use a larger screen or resize your browser window.</p>
+        </div>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
