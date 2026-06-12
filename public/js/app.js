@@ -17,9 +17,9 @@ import { HistogramDisplay } from './histogram.js';
 import { HistoryManager } from './history.js';
 import { computeELA, parseJPEGInternals, estimateJPEGQuality, extractEmbeddedThumbnail } from './forensics.js';
 import { perspectiveWarp } from './perspective.js';
-import { SuperResolver, DOWNLOADABLE_MODELS, preprocessForText, backProject, postprocessForText } from './superres.js';
+import { SuperResolver, SRCancelledError, DOWNLOADABLE_MODELS, preprocessForText, backProject, postprocessForText } from './superres.js';
 import * as Filters from './filters.js';
-import { debounce, throttle, rgbToHex, escapeHtml, showToast, loadPrefs, savePrefs } from './utils.js';
+import { debounce, throttle, rgbToHex, escapeHtml, showToast, loadPrefs, savePrefs, getCanvasCoordinates } from './utils.js';
 
 class ImageForensicsTool {
     constructor() {
@@ -50,6 +50,11 @@ class ImageForensicsTool {
         this.perspectivePoints = null; // null = inactive, [] = collecting
         this.superResolver = null;     // lazy: built on first use
         this.srBusy = false;
+        this.srAbort = null;           // AbortController for the active SR run
+        this.compareSource = null;     // pre-upscale image for A/B vs bicubic
+        this.splitCompare = { active: false, pos: 0.5, dragging: false };
+        this.ocrRegionSelect = null;   // {start} while drag-selecting an OCR region
+        this.reportMeta = null;        // structured metadata captured for case reports
         this.currentFile = null;
         this.prefs = loadPrefs();
 
@@ -88,6 +93,16 @@ class ImageForensicsTool {
 
         this.initEventListeners();
         this.restorePrefs();
+        this.registerServiceWorker();
+    }
+
+    registerServiceWorker() {
+        // Enables offline operation: the app shell and runtime CDN
+        // dependencies are cached, so after one online session Lucid
+        // works with the network unplugged
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(() => {});
+        }
     }
 
     initEventListeners() {
@@ -279,6 +294,14 @@ class ImageForensicsTool {
         });
 
         this.annotationCanvas.addEventListener('mouseup', (e) => {
+            if (this.splitCompare.active) {
+                this.splitCompare.dragging = false;
+                return;
+            }
+            if (this.ocrRegionSelect?.start) {
+                this.finishOcrRegion(e);
+                return;
+            }
             if (!this.spacePressed && !this.colorPickerActive) {
                 if (this.perspectivePoints) {
                     this.addPerspectivePoint(e);
@@ -344,7 +367,11 @@ class ImageForensicsTool {
             }
 
             if (e.key === 'Escape') {
-                if (this.perspectivePoints) {
+                if (this.splitCompare.active) {
+                    this.exitSplitCompare();
+                } else if (this.ocrRegionSelect) {
+                    this.cancelOcrRegionSelect();
+                } else if (this.perspectivePoints) {
                     this.cancelPerspective();
                 } else {
                     this.deselectTool();
@@ -609,8 +636,9 @@ class ImageForensicsTool {
                 urlRow.style.display = DOWNLOADABLE_MODELS[choice] ? 'flex' : 'none';
                 if (DOWNLOADABLE_MODELS[choice]) {
                     const urlInput = document.getElementById('srModelUrl');
-                    if (urlInput && !urlInput.dataset.userEdited) {
+                    if (urlInput) {
                         urlInput.value = DOWNLOADABLE_MODELS[choice].url;
+                        delete urlInput.dataset.userEdited;
                     }
                 }
             }
@@ -630,6 +658,19 @@ class ImageForensicsTool {
             }
         });
         document.getElementById('runSuperRes')?.addEventListener('click', () => this.runSuperResolution());
+        document.getElementById('srOcrBtn')?.addEventListener('click', () => {
+            document.querySelector('.tab-btn[data-tab="osint"]')?.click();
+            this.runOCR();
+        });
+        document.getElementById('splitBtn')?.addEventListener('click', () => this.toggleSplitCompare());
+        document.getElementById('exportReportBtn')?.addEventListener('click', () => this.exportReport());
+        document.getElementById('ocrRegionBtn')?.addEventListener('click', () => this.startOcrRegionSelect());
+        document.getElementById('cancelSuperRes')?.addEventListener('click', () => {
+            if (this.srAbort) {
+                this.srAbort.abort();
+                this.setSrProgress('Cancelling after the current tile...', null);
+            }
+        });
 
         // Persist UI preferences
         ['magLevel', 'magSize', 'magEnhance', 'magGrid', 'magPixelInfo', 'magCrosshair'].forEach(id => {
@@ -718,7 +759,7 @@ class ImageForensicsTool {
 
     startCompare() {
         // Temporarily shows the unmodified original image (hold to view)
-        if (!this.originalImage || this.comparing) return;
+        if (!this.originalImage || this.comparing || this.splitCompare.active) return;
         this.comparing = true;
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         this.ctx.drawImage(this.originalImage, 0, 0);
@@ -916,6 +957,8 @@ class ImageForensicsTool {
             this.annotations.applyBlursTo(this.ctx);
             this.imageData = this.ctx.getImageData(0, 0, w, h);
         }
+
+        if (this.splitCompare.active) this.renderSplitCompare();
 
         this.updateHistogram();
         this.updateEnhanceTabIndicator();
@@ -1156,10 +1199,13 @@ class ImageForensicsTool {
         this.swapWorkingImage(warped.toDataURL(), 'Perspective correction');
     }
 
-    swapWorkingImage(dataUrl, label) {
-        // Replaces the working image (crop / perspective), recording an
-        // undoable command that restores the previous image and state
+    swapWorkingImage(dataUrl, label, opts = {}) {
+        // Replaces the working image (crop / perspective / upscale),
+        // recording an undoable command that restores the previous
+        // image and state. opts.keepCompareSource preserves the A/B
+        // baseline set by super-resolution.
         const prevImage = this.originalImage;
+        const prevCompareSource = this.compareSource;
         const prevFilters = [...this.appliedFilters];
         const prevBlurs = [...this.annotations.blurRegions];
         const prevAnnotations = [...this.annotations.annotations];
@@ -1168,6 +1214,7 @@ class ImageForensicsTool {
         newImage.onload = () => {
             const applyNew = () => {
                 this.originalImage = newImage;
+                if (!opts.keepCompareSource) this.compareSource = null;
                 this.annotations.reset();
                 this.appliedFilters = [];
                 this.resetTransformUI();
@@ -1184,6 +1231,7 @@ class ImageForensicsTool {
                 label,
                 undo: () => {
                     this.originalImage = prevImage;
+                    this.compareSource = prevCompareSource;
                     this.annotations.annotations = [...prevAnnotations];
                     this.annotations.blurRegions = [...prevBlurs];
                     this.appliedFilters = [...prevFilters];
@@ -1211,6 +1259,302 @@ class ImageForensicsTool {
         document.getElementById('flipH').classList.remove('active');
         document.getElementById('flipV').classList.remove('active');
         this.updateZoomStatus(100);
+    }
+
+    toggleSplitCompare() {
+        // Toggles the draggable before/after split view
+        if (this.splitCompare.active) {
+            this.exitSplitCompare();
+            return;
+        }
+        if (!this.originalImage) {
+            showToast('Please load an image first.', 'warning');
+            return;
+        }
+        this.splitCompare.active = true;
+        this.splitCompare.pos = 0.5;
+        document.getElementById('splitBtn')?.classList.add('active');
+        this.annotationCanvas.style.cursor = 'col-resize';
+        this.renderSplitCompare();
+        showToast('Split compare: drag anywhere to move the divider. Esc to exit.', 'info', 3500);
+    }
+
+    exitSplitCompare() {
+        // Leaves split view and restores the normal pipeline render
+        this.splitCompare.active = false;
+        this.splitCompare.dragging = false;
+        document.getElementById('splitBtn')?.classList.remove('active');
+        this.annotationCanvas.style.cursor = this.annotations.currentTool === 'select' ? 'default' : 'crosshair';
+        this.applyEnhancements();
+    }
+
+    updateSplitFromEvent(e) {
+        // Maps a mouse event to a divider position and re-renders
+        const coords = getCanvasCoordinates(this.annotationCanvas, e);
+        this.splitCompare.pos = Math.min(1, Math.max(0, coords.x / this.canvas.width));
+        this.renderSplitCompare();
+    }
+
+    renderSplitCompare() {
+        // Composites the split view: baseline on the left of the
+        // divider, the processed pipeline output on the right. After a
+        // super-resolution swap, the baseline is the pre-upscale image
+        // drawn with bicubic scaling — a direct neural-vs-bicubic A/B
+        // showing exactly which detail the model added.
+        if (!this.imageData) return;
+        const W = this.canvas.width, H = this.canvas.height;
+        this.ctx.putImageData(this.imageData, 0, 0);
+
+        const baseline = this.compareSource || this.originalImage;
+        const splitX = Math.round(this.splitCompare.pos * W);
+
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.rect(0, 0, splitX, H);
+        this.ctx.clip();
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+        this.ctx.drawImage(baseline, 0, 0, W, H);
+        this.ctx.restore();
+
+        // Divider with grab handle
+        this.ctx.save();
+        const lw = Math.max(2, Math.round(W / 500));
+        this.ctx.fillStyle = '#78e030';
+        this.ctx.fillRect(splitX - lw / 2, 0, lw, H);
+        const r = Math.max(9, Math.round(W / 90));
+        this.ctx.beginPath();
+        this.ctx.arc(splitX, H / 2, r, 0, Math.PI * 2);
+        this.ctx.fill();
+        this.ctx.fillStyle = '#000';
+        this.ctx.font = `bold ${r}px monospace`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText('\u2194', splitX, H / 2);
+
+        // Corner labels
+        const fs = Math.max(10, Math.round(W / 70));
+        this.ctx.font = `bold ${fs}px 'JetBrains Mono', monospace`;
+        this.ctx.textBaseline = 'top';
+        const pad = Math.round(fs * 0.45);
+        const leftLabel = this.compareSource ? 'BASELINE (BICUBIC)' : 'ORIGINAL';
+        const drawLabel = (text, anchorX, align) => {
+            this.ctx.textAlign = align;
+            const w = this.ctx.measureText(text).width;
+            const bx = align === 'left' ? anchorX - pad : anchorX - w - pad;
+            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+            this.ctx.fillRect(bx, pad, w + pad * 2, fs + pad * 2);
+            this.ctx.fillStyle = '#78e030';
+            this.ctx.fillText(text, anchorX, pad * 2);
+        };
+        if (splitX > this.ctx.measureText(leftLabel).width + 40) drawLabel(leftLabel, 10 + pad, 'left');
+        if (W - splitX > this.ctx.measureText('PROCESSED').width + 40) drawLabel('PROCESSED', W - 10 - pad, 'right');
+        this.ctx.restore();
+    }
+
+    startOcrRegionSelect() {
+        // Enters one-shot region selection for OCR: reading only the
+        // selected box dramatically improves accuracy on plates and
+        // signs because the engine isn't distracted by the scene
+        if (!this.originalImage) {
+            showToast('Please load an image first.', 'warning');
+            return;
+        }
+        if (this.splitCompare.active) this.exitSplitCompare();
+        this.deselectTool();
+        this.ocrRegionSelect = { start: null };
+        this.annotationCanvas.style.cursor = 'crosshair';
+        document.getElementById('ocrRegionBtn')?.classList.add('active');
+        showToast('Drag a box around the text to read (Esc to cancel).', 'info', 4000);
+    }
+
+    cancelOcrRegionSelect(silent = false) {
+        // Cancels region selection and clears the rubber-band preview
+        if (!this.ocrRegionSelect) return;
+        this.ocrRegionSelect = null;
+        document.getElementById('ocrRegionBtn')?.classList.remove('active');
+        this.annotationCanvas.style.cursor = 'default';
+        this.annotations.redraw();
+        if (!silent) showToast('Region selection cancelled.', 'info', 1500);
+    }
+
+    drawOcrRegionPreview(e) {
+        // Draws the dashed selection rectangle while dragging
+        const start = this.ocrRegionSelect.start;
+        const cur = getCanvasCoordinates(this.annotationCanvas, e);
+        this.annotations.redraw();
+        const ctx = this.annotationCtx;
+        ctx.save();
+        ctx.strokeStyle = '#78e030';
+        ctx.lineWidth = Math.max(1, this.annotations.getScaleFactor());
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(start.x, start.y, cur.x - start.x, cur.y - start.y);
+        ctx.restore();
+    }
+
+    finishOcrRegion(e) {
+        // Finalizes the region and runs OCR on just those pixels
+        const start = this.ocrRegionSelect.start;
+        const end = getCanvasCoordinates(this.annotationCanvas, e);
+        this.cancelOcrRegionSelect(true);
+
+        const x = Math.max(0, Math.floor(Math.min(start.x, end.x)));
+        const y = Math.max(0, Math.floor(Math.min(start.y, end.y)));
+        const w = Math.min(this.canvas.width - x, Math.floor(Math.abs(end.x - start.x)));
+        const h = Math.min(this.canvas.height - y, Math.floor(Math.abs(end.y - start.y)));
+
+        if (w < 8 || h < 8) {
+            showToast('Selection too small for OCR.', 'warning');
+            return;
+        }
+
+        const region = document.createElement('canvas');
+        region.width = w;
+        region.height = h;
+        region.getContext('2d').drawImage(this.canvas, x, y, w, h, 0, 0, w, h);
+
+        document.querySelector('.tab-btn[data-tab="osint"]')?.click();
+        this.runOCR(region);
+    }
+
+    async reportImageDataUrl(source, maxDim = 1600) {
+        // Renders a canvas/image into a size-capped JPEG data URL for
+        // embedding in the self-contained report
+        const sw = source.width, sh = source.height;
+        const scale = Math.min(1, maxDim / Math.max(sw, sh));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(sw * scale));
+        c.height = Math.max(1, Math.round(sh * scale));
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(source, 0, 0, c.width, c.height);
+        return c.toDataURL('image/jpeg', 0.92);
+    }
+
+    async exportReport() {
+        // Generates a self-contained HTML case report: evidence
+        // identification (hashes), the original and working images,
+        // the complete processing audit trail, current enhancement
+        // state, and extracted metadata. Everything is inline — no
+        // external resources — so the file is archivable as-is.
+        if (!this.originalImage) {
+            showToast('Please load an image first.', 'warning');
+            return;
+        }
+        showToast('Generating report...', 'info', 2000);
+
+        const esc = escapeHtml;
+        const meta = this.reportMeta || {};
+        const now = new Date();
+
+        // Images
+        const origDataUrl = await this.reportImageDataUrl(this.originalImage);
+        const workCanvas = this.createExportCanvas(true);
+        const workDataUrl = await this.reportImageDataUrl(workCanvas);
+
+        // Hash of the current working render (full resolution)
+        let workHash = 'unavailable';
+        try {
+            const blob = await new Promise(r => workCanvas.toBlob(r, 'image/png'));
+            workHash = await this.computeImageHash(await blob.arrayBuffer());
+        } catch {}
+
+        // Processing record
+        const historyRows = this.history.entries()
+            .map((label, i) => `<tr><td>${i + 1}</td><td>${esc(label)}</td></tr>`).join('') ||
+            '<tr><td colspan="2">No operations recorded</td></tr>';
+
+        const d = this.enhancements;
+        const defaults = { brightness: 0, contrast: 0, saturation: 0, sharpen: 0, sharpenRadius: 2, sharpenThreshold: 0, gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0 };
+        const enhRows = Object.entries(d)
+            .filter(([k, v]) => v !== defaults[k])
+            .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
+        const curvesNote = this.curvesEditor.isIdentity() ? '' : '<tr><td>curves</td><td>custom curve applied</td></tr>';
+        const filterRows = this.appliedFilters.map((f, i) => `<tr><td>${i + 1}</td><td>${esc(f)}</td></tr>`).join('');
+
+        const annCounts = {};
+        this.annotations.annotations.forEach(a => { annCounts[a.tool] = (annCounts[a.tool] || 0) + 1; });
+        const annSummary = Object.entries(annCounts).map(([t, n]) => `${esc(t)}: ${n}`).join(', ') || 'none';
+        const blurCount = this.annotations.blurRegions.length;
+
+        // Metadata tables from the structured capture
+        const exifRows = meta.exif
+            ? Object.entries(meta.exif)
+                .filter(([, v]) => typeof v !== 'object' || v instanceof Date)
+                .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v instanceof Date ? v.toLocaleString() : String(v))}</td></tr>`).join('')
+            : '';
+
+        const gps = (meta.exif?.latitude && meta.exif?.longitude)
+            ? `<tr><td>GPS</td><td>${Number(meta.exif.latitude).toFixed(6)}, ${Number(meta.exif.longitude).toFixed(6)}</td></tr>` : '';
+
+        const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Lucid Image Analysis Report — ${esc(meta.fileName || 'image')}</title>
+<style>
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#fff;color:#1a1a1a;max-width:960px;margin:0 auto;padding:32px;line-height:1.5}
+h1{font-size:22px;border-bottom:3px solid #78e030;padding-bottom:8px}
+h2{font-size:15px;margin-top:28px;text-transform:uppercase;letter-spacing:1px;color:#333;border-bottom:1px solid #ddd;padding-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:12px;margin:8px 0}
+td,th{border:1px solid #ddd;padding:5px 8px;text-align:left;vertical-align:top;word-break:break-word}
+th{background:#f4f4f4}
+.imgs{display:flex;gap:16px;flex-wrap:wrap}
+.imgs figure{flex:1;min-width:300px;margin:0}
+.imgs img{width:100%;border:1px solid #ccc}
+figcaption{font-size:11px;color:#555;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+.hash{font-family:monospace;font-size:11px}
+footer{margin-top:36px;font-size:11px;color:#777;border-top:1px solid #ddd;padding-top:10px}
+@media print{body{padding:0}}
+</style></head><body>
+<h1>LUCID — IMAGE ANALYSIS REPORT</h1>
+<table>
+<tr><th>Report generated</th><td>${esc(now.toLocaleString())} (local time)</td></tr>
+<tr><th>Tool</th><td>Lucid (client-side image forensics) — all processing performed locally in-browser</td></tr>
+</table>
+
+<h2>Evidence Identification</h2>
+<table>
+${meta.sourceLabel ? `<tr><th>Source</th><td>${esc(meta.sourceLabel)}</td></tr>` : ''}
+${meta.fileName ? `<tr><th>File name</th><td>${esc(meta.fileName)}</td></tr>` : ''}
+${meta.fileSize ? `<tr><th>File size</th><td>${esc(this.formatFileSize(meta.fileSize))}</td></tr>` : ''}
+${meta.fileType ? `<tr><th>MIME type</th><td>${esc(meta.fileType)}</td></tr>` : ''}
+${meta.lastModified ? `<tr><th>File modified</th><td>${esc(new Date(meta.lastModified).toLocaleString())}</td></tr>` : ''}
+<tr><th>Dimensions (working)</th><td>${this.canvas.width} \u00D7 ${this.canvas.height}</td></tr>
+<tr><th>SHA-256 (source file)</th><td class="hash">${esc(meta.hash || 'unavailable')}</td></tr>
+<tr><th>SHA-256 (working render, PNG)</th><td class="hash">${esc(workHash)}</td></tr>
+</table>
+
+<h2>Images</h2>
+<div class="imgs">
+<figure><img src="${origDataUrl}" alt="Original image"><figcaption>Original (as loaded)</figcaption></figure>
+<figure><img src="${workDataUrl}" alt="Working image"><figcaption>Working view (enhancements, filters, annotations)</figcaption></figure>
+</div>
+
+<h2>Processing Audit Trail</h2>
+<table><tr><th style="width:40px">#</th><th>Operation (chronological)</th></tr>${historyRows}</table>
+
+<h2>Active Enhancement State</h2>
+${enhRows || curvesNote ? `<table><tr><th>Parameter</th><th>Value</th></tr>${enhRows}${curvesNote}</table>` : '<p>All enhancement parameters at defaults.</p>'}
+${filterRows ? `<h2>Applied Destructive Filters</h2><table><tr><th style="width:40px">#</th><th>Filter</th></tr>${filterRows}</table>` : ''}
+
+<h2>Annotations</h2>
+<p>Annotations: ${annSummary}. Blur regions: ${blurCount}.</p>
+
+<h2>Extracted Metadata</h2>
+${meta.parseError ? `<p>Metadata could not be parsed: ${esc(meta.parseError)}</p>` : ''}
+${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</table>` : '<p>No EXIF metadata present in the source file.</p>'}
+
+<footer>Generated by Lucid. All analysis was performed locally in the browser; the source image was not transmitted to any server. This report is self-contained and suitable for archiving alongside the original evidence file.</footer>
+</body></html>`;
+
+        const blob = new Blob([html], { type: 'text/html' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        const stamp = now.toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        a.download = `lucid-report-${stamp}.html`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        showToast('Case report exported.', 'success');
     }
 
     setSrProgress(text, fraction = null) {
@@ -1247,11 +1591,15 @@ class ImageForensicsTool {
         const mode = document.getElementById('srMode')?.value || 'general';
         const passes = parseInt(document.getElementById('srPasses')?.value || '1');
         const modelChoice = document.getElementById('srModel')?.value || 'builtin';
+        const ensemble = (document.getElementById('srQuality')?.value === 'max');
 
         // Neural upscaling cost grows with area; protect the tab.
         if (W * H > 2048 * 2048) {
             showToast('Image is too large for in-browser super-resolution (max ~4 MP). Crop to the region of interest first.', 'warning', 6000);
             return;
+        }
+        if (ensemble) {
+            showToast('Maximum quality: each tile runs 8 inference variants — expect ~8x the processing time.', 'info', 4000);
         }
         if (modelChoice === 'realesrgan' && W * H > 512 * 512) {
             showToast('Real-ESRGAN is a heavy model on CPU — above ~0.25 MP expect several minutes. Cropping to the region of interest first is strongly recommended.', 'warning', 7000);
@@ -1261,7 +1609,11 @@ class ImageForensicsTool {
 
         const btn = document.getElementById('runSuperRes');
         this.srBusy = true;
+        this.srAbort = new AbortController();
+        const signal = this.srAbort.signal;
+        const checkCancel = () => { if (signal.aborted) throw new SRCancelledError(); };
         if (btn) { btn.disabled = true; btn.textContent = 'WORKING...'; }
+        document.getElementById('cancelSuperRes')?.classList.remove('hidden');
 
         try {
             // Initialize (or reuse) the requested model
@@ -1279,6 +1631,7 @@ class ImageForensicsTool {
                     await resolver.loadCustom(await file.arrayBuffer(), file.name);
                     this.setSrProgress('Probing model scale...', 0);
                     await resolver.probeScale();
+                    checkCancel();
                 } else if (DOWNLOADABLE_MODELS[modelChoice]) {
                     const def = DOWNLOADABLE_MODELS[modelChoice];
                     const url = document.getElementById('srModelUrl')?.value?.trim() || def.url;
@@ -1287,12 +1640,12 @@ class ImageForensicsTool {
                     // (legitimate) build of the same model
                     const expectedHash = url === def.url ? def.sha256 : null;
                     await resolver.loadFromUrl(url, def.label, def.filename,
-                        (status, fraction) => this.setSrProgress(status, fraction ?? 0), expectedHash);
+                        (status, fraction) => this.setSrProgress(status, fraction ?? 0), expectedHash, signal);
                     this.setSrProgress('Probing model scale...', 0);
                     await resolver.probeScale();
                     document.getElementById('saveSrModel')?.classList.remove('hidden');
                 } else {
-                    await resolver.loadBuiltin((status) => this.setSrProgress(status, 0));
+                    await resolver.loadBuiltin((status) => this.setSrProgress(status, 0), signal);
                 }
                 this.superResolver = resolver;
             }
@@ -1305,6 +1658,7 @@ class ImageForensicsTool {
             current.height = H;
             current.getContext('2d').drawImage(this.originalImage, 0, 0);
 
+            checkCancel();
             if (mode === 'text') {
                 this.setSrProgress('Denoising (text mode)...', 0);
                 preprocessForText(current);
@@ -1312,16 +1666,17 @@ class ImageForensicsTool {
             }
 
             for (let pass = 1; pass <= passes; pass++) {
+                checkCancel();
                 // Re-check area before each pass: 2-pass at 3x is 9x total
                 if (current.width * current.height * scale * scale > 2048 * 2048 * 1.2) {
                     showToast(`Stopped after pass ${pass - 1}: the next pass would exceed the in-browser size limit.`, 'warning', 5000);
                     break;
                 }
 
-                const passLabel = passes > 1 ? ` (pass ${pass}/${passes})` : '';
+                const passLabel = (passes > 1 ? ` (pass ${pass}/${passes})` : '') + (ensemble ? ' [x8]' : '');
                 const result = await this.superResolver.upscale(current, (done, total) => {
                     this.setSrProgress(`Processing tile ${done}/${total}${passLabel}...`, done / total);
-                });
+                }, signal, { ensemble });
 
                 // Back-projection: enforce that downscaling the result
                 // reproduces the actual observed pixels. In TEXT mode
@@ -1330,7 +1685,7 @@ class ImageForensicsTool {
                 const ibpIterations = mode === 'text' ? 3 : 1;
                 await backProject(current, result, ibpIterations, 0.75, (it, total) => {
                     this.setSrProgress(`Back-projection ${it}/${total}${passLabel}...`, it / total);
-                });
+                }, signal);
 
                 current = result;
             }
@@ -1343,17 +1698,30 @@ class ImageForensicsTool {
 
             this.setSrProgress('Finalizing...', 1);
             const totalScale = Math.round(current.width / W);
-            const modeLabel = mode === 'text' ? ', text/plate mode' : '';
-            this.swapWorkingImage(current.toDataURL(), `Super-resolution (${totalScale}x, ${this.superResolver.label}${modeLabel})`);
-            showToast(`Upscaled ${W}\u00D7${H} \u2192 ${current.width}\u00D7${current.height} with ${this.superResolver.label}${modeLabel}. Ctrl+Z to revert.`, 'success', 5000);
+            const modeLabel = (mode === 'text' ? ', text/plate mode' : '') + (ensemble ? ', x8 ensemble' : '');
+            this.compareSource = this.originalImage; // A/B baseline: pre-upscale image
+            this.swapWorkingImage(current.toDataURL(), `Super-resolution (${totalScale}x, ${this.superResolver.label}${modeLabel})`, { keepCompareSource: true });
+            document.getElementById('srOcrBtn')?.classList.remove('hidden');
+            showToast(`Upscaled ${W}\u00D7${H} \u2192 ${current.width}\u00D7${current.height} with ${this.superResolver.label}${modeLabel}. Use SPLIT in the header to compare against bicubic; Ctrl+Z to revert.`, 'success', 6000);
         } catch (err) {
-            console.error('Super-resolution failed:', err);
-            showToast('Super-resolution failed: ' + (err.message || 'unknown error'), 'error', 6000);
-            this.superResolver = null;
+            const cancelled = err?.cancelled || err?.name === 'AbortError';
+            if (cancelled) {
+                // No partial result is ever committed; the working image
+                // is untouched. A fully-loaded model survives the cancel
+                // so the next run skips the download.
+                showToast('Super-resolution cancelled. Nothing was changed.', 'info', 3500);
+                if (!this.superResolver?.session) this.superResolver = null;
+            } else {
+                console.error('Super-resolution failed:', err);
+                showToast('Super-resolution failed: ' + (err.message || 'unknown error'), 'error', 6000);
+                this.superResolver = null;
+            }
         } finally {
             this.srBusy = false;
+            this.srAbort = null;
             this.setSrProgress(null);
             if (btn) { btn.disabled = false; btn.textContent = 'UPSCALE IMAGE'; }
+            document.getElementById('cancelSuperRes')?.classList.add('hidden');
         }
     }
 
@@ -1561,6 +1929,12 @@ class ImageForensicsTool {
         this.colorPickerActive = false;
         this.comparing = false;
         this.elaActive = false;
+        this.compareSource = null;
+        this.splitCompare = { active: false, pos: 0.5, dragging: false };
+        document.getElementById('splitBtn')?.classList.remove('active');
+        this.cancelOcrRegionSelect(true);
+        this.reportMeta = null;
+        document.getElementById('srOcrBtn')?.classList.add('hidden');
         this.appliedFilters = [];
         this.cancelPerspective?.();
         this.history.clear();
@@ -1612,8 +1986,14 @@ class ImageForensicsTool {
         this.colorPickerActive = false;
         this.comparing = false;
         this.elaActive = false;
+        this.compareSource = null;
+        this.splitCompare = { active: false, pos: 0.5, dragging: false };
+        document.getElementById('splitBtn')?.classList.remove('active');
+        this.cancelOcrRegionSelect(true);
         this.cancelPerspective();
+        this.reportMeta = null;
         document.getElementById('exitEla')?.classList.add('hidden');
+        document.getElementById('srOcrBtn')?.classList.add('hidden');
         this.history.clear();
         this.updateHistoryUI();
         this.annotations.reset();
@@ -1830,6 +2210,18 @@ class ImageForensicsTool {
             ` <button class="copy-meta-btn" data-copy="${escapeHtml(imageHash)}" title="Copy hash">COPY</button></td></tr>`;
         html += '</table></div>';
 
+        // Structured capture for the case report exporter
+        this.reportMeta = {
+            sourceLabel: sourceLabel || null,
+            fileName: file.name || null,
+            fileSize: file.size,
+            fileType: file.type || null,
+            lastModified: file.lastModified || null,
+            hash: imageHash,
+            exif: null,
+            parseError: null
+        };
+
         let exifData = null;
         let parseError = null;
         try {
@@ -1846,6 +2238,8 @@ class ImageForensicsTool {
             parseError = err;
             console.error('EXIF parse error:', err);
         }
+        this.reportMeta.exif = exifData;
+        this.reportMeta.parseError = parseError?.message || null;
 
         if (exifData && Object.keys(exifData).length > 0) {
             const cameraFields = ['Make', 'Model', 'LensModel', 'Software'];
@@ -2514,8 +2908,9 @@ class ImageForensicsTool {
         }
     }
 
-    async runOCR() {
-        // Runs Tesseract.js OCR on the current image with progress tracking
+    async runOCR(sourceCanvas = null) {
+        // Runs Tesseract.js OCR on the current image — or, when a
+        // region canvas is supplied, on just that selection
         if (!this.originalImage) {
             showToast('Please load an image first.', 'warning');
             return;
@@ -2538,7 +2933,7 @@ class ImageForensicsTool {
         progressText.textContent = 'Initializing Tesseract...';
 
         try {
-            const dataUrl = this.canvas.toDataURL('image/png');
+            const dataUrl = (sourceCanvas || this.canvas).toDataURL('image/png');
 
             const worker = await Tesseract.createWorker(lang, 1, {
                 logger: (m) => {

@@ -41,6 +41,12 @@ export const BUILTIN_MODEL_URL =
 // from any historical revision. Pinning also makes the published
 // SHA-256 below meaningful as an integrity check.
 export const DOWNLOADABLE_MODELS = {
+    realesrcompact: {
+        label: 'RealESR-general x4v3 (compact)',
+        filename: 'realesr-general-x4v3.onnx',
+        url: 'https://huggingface.co/OwlMaster/AllFilesRope/resolve/d783e61585b3d83a85c91ca8a3b299e8ade94d72/realesr-general-x4v3.onnx',
+        sha256: '09b757accd747d7e423c1d352b3e8f23e77cc5742d04bae958d4eb8082b76fa4'
+    },
     realesrgan: {
         label: 'Real-ESRGAN x4plus',
         filename: 'Real-ESRGAN-x4plus.onnx',
@@ -51,17 +57,39 @@ export const DOWNLOADABLE_MODELS = {
 
 let ortLoadPromise = null;
 
+export class SRCancelledError extends Error {
+    constructor() {
+        // Distinguishes user cancellation from genuine failures
+        super('Super-resolution cancelled');
+        this.name = 'SRCancelledError';
+        this.cancelled = true;
+    }
+}
+
+function throwIfAborted(signal) {
+    // Raises a cancellation error when the abort signal has fired.
+    // Checked at tile boundaries: a WASM inference call cannot be
+    // interrupted mid-run, so this is the cancellation granularity.
+    if (signal?.aborted) throw new SRCancelledError();
+}
+
 function ensureOrtLoaded() {
-    // Lazily injects the ONNX Runtime Web script once and configures
-    // its WASM asset path to the same CDN directory
+    // Lazily injects ONNX Runtime Web once. The webgpu bundle is used
+    // (it includes the WASM backend as fallback) so GPU-capable
+    // browsers run models orders of magnitude faster. WASM compute is
+    // proxied to a worker so the UI thread never blocks mid-tile, and
+    // when the page is cross-origin isolated (see server/index.js) ORT
+    // automatically uses multithreaded WASM.
     if (window.ort) return Promise.resolve(window.ort);
     if (!ortLoadPromise) {
         ortLoadPromise = new Promise((resolve, reject) => {
             const script = document.createElement('script');
-            script.src = ORT_BASE + 'ort.min.js';
+            script.src = ORT_BASE + 'ort.webgpu.min.js';
+            script.crossOrigin = 'anonymous';
             script.onload = () => {
                 try {
                     window.ort.env.wasm.wasmPaths = ORT_BASE;
+                    window.ort.env.wasm.proxy = true;
                 } catch {}
                 resolve(window.ort);
             };
@@ -73,6 +101,90 @@ function ensureOrtLoaded() {
         });
     }
     return ortLoadPromise;
+}
+
+async function createSession(ort, buffer) {
+    // Prefers the WebGPU execution provider, falling back to WASM.
+    // Tried in sequence because EP availability is only known at
+    // session-creation time (no adapter, unsupported ops, etc.).
+    if (navigator.gpu) {
+        try {
+            return await ort.InferenceSession.create(buffer, { executionProviders: ['webgpu'] });
+        } catch (err) {
+            console.warn('WebGPU EP unavailable, falling back to WASM:', err?.message);
+        }
+    }
+    return ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
+}
+
+const MODEL_CACHE = 'lucid-models-v1';
+let persistRequested = false;
+
+async function cachedModelFetch(url, onStatus, signal, streamProgress = true) {
+    // Fetches model bytes through the Cache API: the browser HTTP cache
+    // happily evicts 67 MB files, so verified downloads are stored in a
+    // named cache (with best-effort persistent storage) making the
+    // download genuinely one-time — and available fully offline.
+    if ('caches' in window) {
+        try {
+            const cache = await caches.open(MODEL_CACHE);
+            const hit = await cache.match(url);
+            if (hit) {
+                onStatus?.('Loading model from local cache...');
+                return await hit.arrayBuffer();
+            }
+        } catch {}
+    }
+
+    const resp = await fetch(url, { signal });
+    if (!resp.ok) throw new Error(`Model download failed (HTTP ${resp.status}). The hosting URL may have moved — paste a mirror URL and retry.`);
+
+    let buffer;
+    if (streamProgress && resp.body && resp.body.getReader) {
+        const total = parseInt(resp.headers.get('content-length') || '0');
+        const totalLabel = total ? ` / ${(total / 1048576).toFixed(1)} MB` : '';
+        const reader = resp.body.getReader();
+        const chunks = [];
+        let received = 0;
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            onStatus?.(`Downloading ${(received / 1048576).toFixed(1)} MB${totalLabel}...`, total ? received / total : null);
+        }
+        const merged = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.length;
+        }
+        buffer = merged.buffer;
+    } else {
+        buffer = await resp.arrayBuffer();
+    }
+
+    if ('caches' in window) {
+        try {
+            if (!persistRequested) {
+                persistRequested = true;
+                navigator.storage?.persist?.();
+            }
+            const cache = await caches.open(MODEL_CACHE);
+            await cache.put(url, new Response(buffer.slice(0), {
+                headers: { 'Content-Type': 'application/octet-stream' }
+            }));
+        } catch {}
+    }
+    return buffer;
+}
+
+export async function clearModelCache() {
+    // Removes all locally cached model files
+    if ('caches' in window) {
+        try { return await caches.delete(MODEL_CACHE); } catch {}
+    }
+    return false;
 }
 
 function tilePositions(extent, tile, step) {
@@ -125,57 +237,28 @@ export class SuperResolver {
         this.filename = 'model.onnx';
     }
 
-    async loadBuiltin(onStatus) {
-        // Downloads and initializes the built-in Sub-Pixel CNN model
+    async loadBuiltin(onStatus, signal = null) {
+        // Downloads (or loads from cache) the built-in Sub-Pixel CNN
         const ort = await ensureOrtLoaded();
-        onStatus?.('Downloading model (~240 KB)...');
-        const resp = await fetch(BUILTIN_MODEL_URL);
-        if (!resp.ok) throw new Error('Model download failed (HTTP ' + resp.status + ')');
-        const buffer = await resp.arrayBuffer();
+        onStatus?.('Fetching model (~240 KB)...');
+        const buffer = await cachedModelFetch(BUILTIN_MODEL_URL, onStatus, signal, false);
         onStatus?.('Initializing model...');
-        this.session = await ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
+        this.session = await createSession(ort, buffer);
         this.kind = 'y224';
         this.scale = 3;
         this.label = 'Sub-Pixel CNN 3x';
         return this;
     }
 
-    async loadFromUrl(url, label, filename, onStatus, expectedSha256 = null) {
-        // Downloads an RGB model from a URL with streaming progress,
-        // keeping the bytes so the user can save the model to disk for
-        // fully-offline reuse via the custom-file path. When the URL is
-        // the pinned default, the download is verified against the
-        // published SHA-256 before any inference runs.
+    async loadFromUrl(url, label, filename, onStatus, expectedSha256 = null, signal = null) {
+        // Downloads an RGB model (or loads it from the local model
+        // cache), keeping the bytes so the user can save the model to
+        // disk for offline reuse. When the URL is the pinned default,
+        // the bytes are verified against the published SHA-256 before
+        // any inference runs.
         const ort = await ensureOrtLoaded();
         onStatus?.('Connecting...');
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`Model download failed (HTTP ${resp.status}). The hosting URL may have moved — paste a mirror URL and retry.`);
-
-        const total = parseInt(resp.headers.get('content-length') || '0');
-        const totalLabel = total ? ` / ${(total / 1048576).toFixed(1)} MB` : '';
-        let buffer;
-
-        if (resp.body && resp.body.getReader) {
-            const reader = resp.body.getReader();
-            const chunks = [];
-            let received = 0;
-            for (;;) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-                received += value.length;
-                onStatus?.(`Downloading ${(received / 1048576).toFixed(1)} MB${totalLabel}...`, total ? received / total : null);
-            }
-            const merged = new Uint8Array(received);
-            let offset = 0;
-            for (const chunk of chunks) {
-                merged.set(chunk, offset);
-                offset += chunk.length;
-            }
-            buffer = merged.buffer;
-        } else {
-            buffer = await resp.arrayBuffer();
-        }
+        const buffer = await cachedModelFetch(url, onStatus, signal, true);
 
         if (expectedSha256) {
             onStatus?.('Verifying SHA-256...');
@@ -183,12 +266,13 @@ export class SuperResolver {
             const hex = Array.from(new Uint8Array(digest))
                 .map(b => b.toString(16).padStart(2, '0')).join('');
             if (hex !== expectedSha256) {
+                try { (await caches.open(MODEL_CACHE)).delete(url); } catch {}
                 throw new Error('Model integrity check failed — downloaded bytes do not match the published SHA-256. Refusing to load.');
             }
         }
 
         onStatus?.('Initializing model...');
-        this.session = await ort.InferenceSession.create(buffer, { executionProviders: ['wasm'] });
+        this.session = await createSession(ort, buffer);
         this.kind = 'rgb';
         this.scale = null;
         this.label = label;
@@ -213,21 +297,59 @@ export class SuperResolver {
     async loadCustom(arrayBuffer, name = 'custom model') {
         // Initializes a user-supplied RGB ONNX model from file bytes
         const ort = await ensureOrtLoaded();
-        this.session = await ort.InferenceSession.create(arrayBuffer, { executionProviders: ['wasm'] });
+        this.session = await createSession(ort, arrayBuffer);
         this.kind = 'rgb';
         this.scale = null; // probed on first use
         this.label = name;
         return this;
     }
 
-    async upscale(srcCanvas, onProgress) {
-        // Upscales a canvas, returning a new canvas scale-times larger
+    async upscale(srcCanvas, onProgress, signal = null, opts = {}) {
+        // Upscales a canvas, returning a new canvas scale-times larger.
+        // opts.ensemble enables 8-variant test-time augmentation.
         if (!this.session) throw new Error('No model loaded');
-        if (this.kind === 'y224') return this.upscaleY(srcCanvas, onProgress);
-        return this.upscaleRGB(srcCanvas, onProgress);
+        if (this.kind === 'y224') return this.upscaleY(srcCanvas, onProgress, signal, opts);
+        return this.upscaleRGB(srcCanvas, onProgress, signal, opts);
     }
 
-    async upscaleY(srcCanvas, onProgress) {
+    async runTilePlanes(planes, n, ensemble) {
+        // Runs the model on planar float input (1 plane for luminance
+        // models, 3 for RGB), optionally as an 8-variant self-ensemble.
+        // Returns averaged output planes plus the output tile size.
+        const ort = window.ort;
+        const inName = this.session.inputNames[0];
+        const outName = this.session.outputNames[0];
+        const variants = ensemble ? TTA_VARIANTS : [TTA_VARIANTS[0]];
+        const C = planes.length;
+
+        let accum = null;
+        let oN = 0;
+        for (const { k, flip } of variants) {
+            const input = new Float32Array(C * n * n);
+            for (let c = 0; c < C; c++) {
+                input.set(transformPlane(planes[c], n, k, flip), c * n * n);
+            }
+            const tensor = new ort.Tensor('float32', input, [1, C, n, n]);
+            const result = await this.session.run({ [inName]: tensor });
+            const o = result[outName].data;
+            oN = result[outName].dims[3];
+            if (!accum) accum = Array.from({ length: C }, () => new Float32Array(oN * oN));
+            for (let c = 0; c < C; c++) {
+                const slice = o.subarray ? o.subarray(c * oN * oN, (c + 1) * oN * oN)
+                    : o.slice(c * oN * oN, (c + 1) * oN * oN);
+                const restored = inverseTransformPlane(slice, oN, k, flip);
+                const acc = accum[c];
+                for (let i = 0; i < acc.length; i++) acc[i] += restored[i];
+            }
+        }
+        const inv = 1 / variants.length;
+        for (const acc of accum) {
+            for (let i = 0; i < acc.length; i++) acc[i] *= inv;
+        }
+        return { planes: accum, size: oN };
+    }
+
+    async upscaleY(srcCanvas, onProgress, signal = null, opts = {}) {
         // Built-in path: 224x224 luminance tiles, 3x output, color from
         // a bicubic upscale of the same tile (BT.601 YCbCr recombine)
         const ort = window.ort;
@@ -254,14 +376,12 @@ export class SuperResolver {
         colorCtx.imageSmoothingEnabled = true;
         colorCtx.imageSmoothingQuality = 'high';
 
-        const inName = this.session.inputNames[0];
-        const outName = this.session.outputNames[0];
-
         const total = xs.length * ys.length;
         let done = 0;
 
         for (const ty of ys) {
             for (const tx of xs) {
+                throwIfAborted(signal);
                 const src = pctx.getImageData(tx, ty, tile, tile).data;
 
                 // Luminance plane, normalized to [0,1]
@@ -270,10 +390,7 @@ export class SuperResolver {
                     y[p] = (0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2]) / 255;
                 }
 
-                const tensor = new ort.Tensor('float32', y, [1, 1, tile, tile]);
-                const result = await this.session.run({ [inName]: tensor });
-                const outY = result[outName].data;
-                const oTile = result[outName].dims[2]; // 672
+                const { planes: [outY], size: oTile } = await this.runTilePlanes([y], tile, opts.ensemble);
 
                 // Chrominance from a smooth upscale of the same region
                 colorCtx.drawImage(padded, tx, ty, tile, tile, 0, 0, oTile, oTile);
@@ -352,7 +469,7 @@ export class SuperResolver {
         return scale;
     }
 
-    async upscaleRGB(srcCanvas, onProgress) {
+    async upscaleRGB(srcCanvas, onProgress, signal = null, opts = {}) {
         // Custom path: NCHW float32 RGB in [0,1], tiled. Tile size is
         // free for dynamic-dim models, or locked to the model's fixed
         // input size when probing detected one.
@@ -376,8 +493,6 @@ export class SuperResolver {
         out.height = H * scale;
         const outCtx = out.getContext('2d');
 
-        const inName = this.session.inputNames[0];
-        const outName = this.session.outputNames[0];
         const plane = tile * tile;
 
         const total = xs.length * ys.length;
@@ -385,29 +500,29 @@ export class SuperResolver {
 
         for (const ty of ys) {
             for (const tx of xs) {
+                throwIfAborted(signal);
                 const src = pctx.getImageData(tx, ty, tile, tile).data;
 
-                // Planar RGB tensor in [0,1]
-                const input = new Float32Array(3 * plane);
+                // Planar RGB in [0,1]
+                const rP = new Float32Array(plane);
+                const gP = new Float32Array(plane);
+                const bP = new Float32Array(plane);
                 for (let i = 0, p = 0; p < plane; i += 4, p++) {
-                    input[p] = src[i] / 255;
-                    input[plane + p] = src[i + 1] / 255;
-                    input[2 * plane + p] = src[i + 2] / 255;
+                    rP[p] = src[i] / 255;
+                    gP[p] = src[i + 1] / 255;
+                    bP[p] = src[i + 2] / 255;
                 }
 
-                const tensor = new ort.Tensor('float32', input, [1, 3, tile, tile]);
-                const result = await this.session.run({ [inName]: tensor });
-                const o = result[outName].data;
-                const oTile = result[outName].dims[3];
+                const { planes: [oR, oG, oB], size: oTile } = await this.runTilePlanes([rP, gP, bP], tile, opts.ensemble);
                 const oPlane = oTile * oTile;
 
                 const cImg = new ImageData(oTile, oTile);
                 const c = cImg.data;
                 for (let p = 0; p < oPlane; p++) {
                     const i = p * 4;
-                    c[i] = Math.min(255, Math.max(0, o[p] * 255));
-                    c[i + 1] = Math.min(255, Math.max(0, o[oPlane + p] * 255));
-                    c[i + 2] = Math.min(255, Math.max(0, o[2 * oPlane + p] * 255));
+                    c[i] = Math.min(255, Math.max(0, oR[p] * 255));
+                    c[i + 1] = Math.min(255, Math.max(0, oG[p] * 255));
+                    c[i + 2] = Math.min(255, Math.max(0, oB[p] * 255));
                     c[i + 3] = 255;
                 }
 
@@ -521,7 +636,7 @@ function boxBlurPlane(plane, width, height, radius) {
     }
 }
 
-export async function backProject(srcCanvas, upCanvas, iterations = 2, alpha = 0.75, onProgress) {
+export async function backProject(srcCanvas, upCanvas, iterations = 2, alpha = 0.75, onProgress, signal = null) {
     // Iterative back-projection: refines `upCanvas` in place so that
     // downscaling it reproduces `srcCanvas`. Each iteration downscales
     // the current estimate, computes the residual against the true
@@ -544,6 +659,7 @@ export async function backProject(srcCanvas, upCanvas, iterations = 2, alpha = 0
     downCtx.imageSmoothingQuality = 'high';
 
     for (let it = 0; it < iterations; it++) {
+        throwIfAborted(signal);
         downCtx.clearRect(0, 0, W, H);
         downCtx.drawImage(upCanvas, 0, 0, UW, UH, 0, 0, W, H);
         const downData = downCtx.getImageData(0, 0, W, H).data;
@@ -598,3 +714,56 @@ export function postprocessForText(canvas) {
     applyUnsharpMask(img.data, canvas.width, canvas.height, 0.8, 1, 2);
     ctx.putImageData(img, 0, 0);
 }
+
+/* ============================================================
+   SELF-ENSEMBLE (x8 test-time augmentation)
+   Standard SR quality technique: each tile is inferred 8 times — the
+   4 rotations of the original and of its mirror — outputs are
+   inverse-transformed back and averaged. Averaging cancels the
+   orientation-dependent component of model error, giving a measurable
+   PSNR gain at 8x the compute. Transforms are exact index remappings
+   on square planes (no resampling), so the ensemble itself introduces
+   zero interpolation loss.
+   ============================================================ */
+
+export function rotatePlane90(plane, n) {
+    // Rotates an n x n plane 90 degrees clockwise: out(x,y) = in(y, n-1-x)
+    const out = new Float32Array(n * n);
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+            out[y * n + x] = plane[(n - 1 - x) * n + y];
+        }
+    }
+    return out;
+}
+
+export function flipPlaneH(plane, n) {
+    // Mirrors an n x n plane horizontally
+    const out = new Float32Array(n * n);
+    for (let y = 0; y < n; y++) {
+        for (let x = 0; x < n; x++) {
+            out[y * n + x] = plane[y * n + (n - 1 - x)];
+        }
+    }
+    return out;
+}
+
+export function transformPlane(plane, n, k, flip) {
+    // Forward TTA transform: optional horizontal flip, then k clockwise
+    // 90-degree rotations
+    let p = flip ? flipPlaneH(plane, n) : plane;
+    for (let i = 0; i < k; i++) p = rotatePlane90(p, n);
+    return p;
+}
+
+export function inverseTransformPlane(plane, n, k, flip) {
+    // Exact inverse of transformPlane: undo rotations first, then flip
+    let p = plane;
+    for (let i = 0; i < (4 - k) % 4; i++) p = rotatePlane90(p, n);
+    return flip ? flipPlaneH(p, n) : p;
+}
+
+export const TTA_VARIANTS = [
+    { k: 0, flip: false }, { k: 1, flip: false }, { k: 2, flip: false }, { k: 3, flip: false },
+    { k: 0, flip: true },  { k: 1, flip: true },  { k: 2, flip: true },  { k: 3, flip: true }
+];

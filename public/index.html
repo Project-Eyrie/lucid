@@ -9,8 +9,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0a0a0a">
+    <script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
     <div id="splashScreen" class="splash-screen">
@@ -145,6 +147,13 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="3" y="5" width="18" height="14" rx="2"/>
                         <line x1="12" y1="5" x2="12" y2="19"/>
+                    </svg>
+                </button>
+                <button id="splitBtn" class="header-btn" type="button" title="Split compare: draggable before/after divider (Esc to exit)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="5" width="18" height="14" rx="2"/>
+                        <line x1="12" y1="3" x2="12" y2="21"/>
+                        <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
                     </svg>
                 </button>
                 <button id="zoomFit" class="header-btn" type="button" title="Fit image to view">
@@ -408,23 +417,33 @@
                                 </select>
                             </div>
                             <div class="control-row">
+                                <label>QUALITY</label>
+                                <select id="srQuality" class="select-input">
+                                    <option value="standard">STANDARD</option>
+                                    <option value="max">MAXIMUM — X8 ENSEMBLE, SLOW</option>
+                                </select>
+                            </div>
+                            <div class="control-row">
                                 <label>MODEL</label>
                                 <select id="srModel" class="select-input">
                                     <option value="builtin">SUB-PIXEL CNN — 3X (BUILT-IN, ~240 KB)</option>
-                                    <option value="realesrgan">REAL-ESRGAN X4PLUS (DOWNLOAD ~67 MB)</option>
+                                    <option value="realesrcompact">REALESR-GENERAL 4X COMPACT (~5 MB) — RECOMMENDED</option>
+                                    <option value="realesrgan">REAL-ESRGAN X4PLUS (~67 MB, SLOW)</option>
                                     <option value="custom">CUSTOM .ONNX (RGB, E.G. ESRGAN)</option>
                                 </select>
                             </div>
                             <div class="control-row" id="srUrlRow" style="display:none;">
                                 <label>MODEL URL</label>
-                                <input type="url" id="srModelUrl" class="text-input-small" value="https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/01179a4da7bf5ac91faca650e6afbf282ac93933/Real-ESRGAN-x4plus.onnx" spellcheck="false">
+                                <input type="url" id="srModelUrl" class="text-input-small" value="" placeholder="Filled automatically — editable if you prefer a mirror" spellcheck="false">
                             </div>
                             <div class="control-row" id="srCustomRow" style="display:none;">
                                 <label>MODEL FILE</label>
                                 <input type="file" id="srModelFile" accept=".onnx" class="file-input-small">
                             </div>
                             <button id="runSuperRes" class="panel-btn primary">UPSCALE IMAGE</button>
+                            <button id="cancelSuperRes" class="panel-btn hidden" title="Stops after the current tile — nothing is changed">CANCEL</button>
                             <button id="saveSrModel" class="panel-btn hidden" title="Save the downloaded model so it can be reused offline via CUSTOM .ONNX">SAVE MODEL TO DISK</button>
+                            <button id="srOcrBtn" class="panel-btn hidden" title="Run OCR on the upscaled result">READ TEXT (OCR)</button>
                             <div id="srProgress" class="ocr-progress" style="display:none;">
                                 <div class="ocr-progress-bar"><div id="srProgressFill" class="ocr-progress-fill"></div></div>
                                 <span id="srProgressText" class="ocr-progress-text">Loading model...</span>
@@ -732,7 +751,8 @@
                                         <option value="chi_tra">CHINESE (TRADITIONAL)</option>
                                     </select>
                                 </div>
-                                <button id="runOcr" class="panel-btn primary">EXTRACT TEXT</button>
+                                <button id="runOcr" class="panel-btn primary">EXTRACT TEXT (WHOLE IMAGE)</button>
+                                <button id="ocrRegionBtn" class="panel-btn" title="Drag a box on the image — reading only the selection is far more accurate on plates and signs">SELECT REGION &amp; EXTRACT</button>
                                 <div id="ocrProgress" class="ocr-progress" style="display:none;">
                                     <div class="ocr-progress-bar"><div id="ocrProgressFill" class="ocr-progress-fill"></div></div>
                                     <span id="ocrProgressText" class="ocr-progress-text">Initializing...</span>
@@ -767,6 +787,12 @@
                     </div>
 
                     <div id="exif" class="tab-panel">
+                        <div class="panel-section">
+                            <h3>CASE REPORT</h3>
+                            <p class="section-hint">Exports a self-contained HTML report: SHA-256 of the source file and working render, original and processed images, the full processing audit trail, enhancement state, and extracted metadata. Archivable alongside the evidence file; prints cleanly to PDF.</p>
+                            <button id="exportReportBtn" class="panel-btn primary">EXPORT CASE REPORT (HTML)</button>
+                        </div>
+
                         <div class="panel-section">
                             <h3>METADATA</h3>
                             <div id="exifContent" class="exif-content">
@@ -828,6 +854,7 @@
                         <span><kbd>ESC</kbd></span><span>Deselect tool / cancel perspective</span>
                         <span><kbd>SPACE</kbd></span><span>Pan (hold and drag)</span>
                         <span><kbd>\</kbd></span><span>Hold to compare with original</span>
+                        <span><kbd>SPLIT</kbd></span><span>Draggable before/after divider (header button, Esc exits)</span>
                         <span><kbd>Ctrl+Z</kbd></span><span>Undo</span>
                         <span><kbd>Ctrl+Shift+Z</kbd></span><span>Redo</span>
                         <span><kbd>Ctrl+V</kbd></span><span>Paste Image</span>
@@ -848,11 +875,11 @@
                 </div>
                 <div class="help-section">
                     <h3>OSINT TAB</h3>
-                    <p>Reverse image search, in-browser OCR, and Error Level Analysis (ELA) — a quick manipulation screen that highlights regions whose JPEG error level differs from their surroundings.</p>
+                    <p>Reverse image search, in-browser OCR (whole image or a drag-selected region — region mode is far more accurate on plates and signs), and Error Level Analysis (ELA) — a quick manipulation screen that highlights regions whose JPEG error level differs from their surroundings.</p>
                 </div>
                 <div class="help-section">
                     <h3>METADATA TAB</h3>
-                    <p>EXIF data with copy buttons, GPS map, raw tag dump, JPEG quantization tables with estimated encoder quality, embedded thumbnail comparison (mismatches betray editing), SHA-256 hash, and a session history audit trail of every operation applied.</p>
+                    <p>EXIF data with copy buttons, GPS map, raw tag dump, JPEG quantization tables with estimated encoder quality, embedded thumbnail comparison (mismatches betray editing), SHA-256 hash, and a session history audit trail. EXPORT CASE REPORT produces a self-contained HTML report — hashes, images, audit trail, settings, metadata — archivable as-is and printable to PDF. Lucid also installs as an offline app: after one online session, everything (including downloaded models) works with the network unplugged.</p>
                 </div>
             </div>
         </div>
