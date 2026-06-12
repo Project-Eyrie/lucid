@@ -1282,8 +1282,12 @@ class ImageForensicsTool {
                 } else if (DOWNLOADABLE_MODELS[modelChoice]) {
                     const def = DOWNLOADABLE_MODELS[modelChoice];
                     const url = document.getElementById('srModelUrl')?.value?.trim() || def.url;
+                    // Integrity check only applies to the pinned default
+                    // URL — a user-supplied mirror may be a different
+                    // (legitimate) build of the same model
+                    const expectedHash = url === def.url ? def.sha256 : null;
                     await resolver.loadFromUrl(url, def.label, def.filename,
-                        (status, fraction) => this.setSrProgress(status, fraction ?? 0));
+                        (status, fraction) => this.setSrProgress(status, fraction ?? 0), expectedHash);
                     this.setSrProgress('Probing model scale...', 0);
                     await resolver.probeScale();
                     document.getElementById('saveSrModel')?.classList.remove('hidden');

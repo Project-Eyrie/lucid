@@ -34,11 +34,18 @@ export const BUILTIN_MODEL_URL =
 // because third-party hosting can move; any mirror of the same .onnx
 // works. Models must take NCHW float32 RGB in [0,1] (fixed or dynamic
 // spatial dims — both are handled).
+//
+// The Real-ESRGAN URL is pinned to an immutable commit: the repo's
+// current main branch no longer carries the raw .onnx (Qualcomm moved
+// release binaries out of the tree), but Hugging Face serves files
+// from any historical revision. Pinning also makes the published
+// SHA-256 below meaningful as an integrity check.
 export const DOWNLOADABLE_MODELS = {
     realesrgan: {
         label: 'Real-ESRGAN x4plus',
         filename: 'Real-ESRGAN-x4plus.onnx',
-        url: 'https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/main/Real-ESRGAN-x4plus.onnx'
+        url: 'https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/01179a4da7bf5ac91faca650e6afbf282ac93933/Real-ESRGAN-x4plus.onnx',
+        sha256: '4e1ae0e47f80d9f4aa2a317c24fde2cb3e49a5381eed6e1d509b4001a4b97ad2'
     }
 };
 
@@ -133,10 +140,12 @@ export class SuperResolver {
         return this;
     }
 
-    async loadFromUrl(url, label, filename, onStatus) {
+    async loadFromUrl(url, label, filename, onStatus, expectedSha256 = null) {
         // Downloads an RGB model from a URL with streaming progress,
         // keeping the bytes so the user can save the model to disk for
-        // fully-offline reuse via the custom-file path
+        // fully-offline reuse via the custom-file path. When the URL is
+        // the pinned default, the download is verified against the
+        // published SHA-256 before any inference runs.
         const ort = await ensureOrtLoaded();
         onStatus?.('Connecting...');
         const resp = await fetch(url);
@@ -166,6 +175,16 @@ export class SuperResolver {
             buffer = merged.buffer;
         } else {
             buffer = await resp.arrayBuffer();
+        }
+
+        if (expectedSha256) {
+            onStatus?.('Verifying SHA-256...');
+            const digest = await crypto.subtle.digest('SHA-256', buffer);
+            const hex = Array.from(new Uint8Array(digest))
+                .map(b => b.toString(16).padStart(2, '0')).join('');
+            if (hex !== expectedSha256) {
+                throw new Error('Model integrity check failed — downloaded bytes do not match the published SHA-256. Refusing to load.');
+            }
         }
 
         onStatus?.('Initializing model...');
