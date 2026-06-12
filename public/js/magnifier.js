@@ -174,8 +174,6 @@ export class Magnifier {
         pixelInfo.style.left = (mouseX + 10) + 'px';
         pixelInfo.style.top = (mouseY - 40) + 'px';
 
-        // Clamp to valid pixel coordinates: at the right/bottom edges the
-        // raw cursor position can index one past the buffer (RGB: undefined)
         const px = Math.max(0, Math.min(width - 1, Math.floor(canvasX)));
         const py = Math.max(0, Math.min(Math.floor(imageData.data.length / 4 / width) - 1, Math.floor(canvasY)));
         const idx = (py * width + px) * 4;

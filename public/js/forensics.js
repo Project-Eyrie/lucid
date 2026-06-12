@@ -69,9 +69,8 @@ export function parseJPEGInternals(arrayBuffer) {
         const marker = bytes[pos + 1];
         pos += 2;
 
-        // Standalone markers without a length field
         if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) continue;
-        if (marker === 0xD9) break; // EOI
+        if (marker === 0xD9) break;
         if (pos + 1 >= bytes.length) break;
 
         const length = (bytes[pos] << 8) | bytes[pos + 1];
@@ -80,10 +79,9 @@ export function parseJPEGInternals(arrayBuffer) {
         result.markers.push('FF' + marker.toString(16).toUpperCase().padStart(2, '0'));
 
         if (marker === 0xDB) {
-            // DQT — may contain multiple tables in one segment
             let p = segStart;
             while (p < segEnd) {
-                const precision = bytes[p] >> 4;        // 0 = 8-bit, 1 = 16-bit
+                const precision = bytes[p] >> 4;
                 const tableId = bytes[p] & 0x0F;
                 p++;
                 const zigzagged = new Array(64);
@@ -93,13 +91,11 @@ export function parseJPEGInternals(arrayBuffer) {
                         : (bytes[p + i * 2] << 8) | bytes[p + i * 2 + 1];
                 }
                 p += precision === 0 ? 64 : 128;
-                // De-zigzag into natural 8x8 row order
                 const table = new Array(64);
                 for (let i = 0; i < 64; i++) table[ZIGZAG[i]] = zigzagged[i];
                 result.quantTables.push({ id: tableId, precision: precision === 0 ? 8 : 16, values: table });
             }
         } else if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
-            // SOFn — frame header
             result.frame = {
                 bitDepth: bytes[segStart],
                 height: (bytes[segStart + 1] << 8) | bytes[segStart + 2],
@@ -108,7 +104,6 @@ export function parseJPEGInternals(arrayBuffer) {
             };
             if (marker === 0xC2) result.progressive = true;
         } else if (marker === 0xDA) {
-            // SOS — entropy-coded data follows; scan forward for the next marker
             pos = segEnd;
             while (pos < bytes.length - 1) {
                 if (bytes[pos] === 0xFF && bytes[pos + 1] !== 0x00 &&

@@ -30,7 +30,7 @@ function solveLinearSystem(A, b) {
     return M.map((row, i) => row[n] / row[i]);
 }
 
-export function computeHomography(srcPts, dstPts) {
+function computeHomography(srcPts, dstPts) {
     // Computes the 3x3 homography mapping srcPts -> dstPts (4 point pairs)
     const A = [];
     const b = [];
@@ -57,7 +57,7 @@ function invertHomography(H) {
     ];
 }
 
-export function orderCorners(points) {
+function orderCorners(points) {
     // Orders 4 arbitrary points as [topLeft, topRight, bottomRight, bottomLeft]
     // top-left has the smallest x+y, bottom-right the largest;
     // the remaining two are split by x position.
@@ -106,7 +106,6 @@ export function perspectiveWarp(sourceCanvas, corners) {
 
     for (let y = 0; y < outH; y++) {
         for (let x = 0; x < outW; x++) {
-            // Inverse-map destination pixel to source coordinates
             const w = Hinv[6] * x + Hinv[7] * y + Hinv[8];
             const sx = (Hinv[0] * x + Hinv[1] * y + Hinv[2]) / w;
             const sy = (Hinv[3] * x + Hinv[4] * y + Hinv[5]) / w;
@@ -117,7 +116,6 @@ export function perspectiveWarp(sourceCanvas, corners) {
                 continue;
             }
 
-            // Bilinear sample
             const x0 = Math.floor(sx), y0 = Math.floor(sy);
             const fx = sx - x0, fy = sy - y0;
             const i00 = (y0 * sw + x0) * 4;

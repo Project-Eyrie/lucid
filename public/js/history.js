@@ -56,8 +56,15 @@ export class HistoryManager {
         this.notify();
     }
 
-    get canUndo() { return this.undoStack.length > 0; }
-    get canRedo() { return this.redoStack.length > 0; }
+    get canUndo() {
+        // True when at least one command can be reverted
+        return this.undoStack.length > 0;
+    }
+
+    get canRedo() {
+        // True when at least one undone command can be re-applied
+        return this.redoStack.length > 0;
+    }
 
     entries() {
         // Returns labels of all recorded commands, oldest first

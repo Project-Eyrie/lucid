@@ -1,8 +1,12 @@
-// Lucid smoke harness: a minimal DOM shim sufficient to construct the
-// real ImageForensicsTool and drive the two reported flows:
-//  1. load an image -> metadata panel must populate
-//  2. toggle split compare -> mousedown+mousemove must move the divider
-// Any uncaught exception in app code is reported with its stack.
+/*
+ * Lucid smoke harness: a minimal DOM shim sufficient to construct the
+ * real ImageForensicsTool and drive end-to-end flows without a browser:
+ * image load (metadata panel must populate, with real JPEG bytes and a
+ * realistically slow exifr stub that reproduces the reset race), split
+ * compare (mousedown+mousemove must move the divider), and region OCR
+ * (drag-select must produce recognized text). Any uncaught exception in
+ * app code is reported with its stack; exits non-zero on failure.
+ */
 
 process.on('unhandledRejection', (err) => {
     console.error('UNHANDLED REJECTION:', err && err.stack || err);
@@ -11,7 +15,6 @@ process.on('unhandledRejection', (err) => {
 
 const failures = [];
 
-// ---------- canvas 2d context stub (records calls) ----------
 function makeCtx(canvas) {
     const calls = [];
     const ctx = {
@@ -39,7 +42,6 @@ function makeCtx(canvas) {
     return ctx;
 }
 
-// ---------- element stub ----------
 const valueSpan = () => makeEl('span.value');
 function makeEl(id) {
     const listeners = {};
@@ -92,7 +94,6 @@ function makeEl(id) {
     return el;
 }
 
-// ---------- document / window ----------
 const registry = {};
 const docListeners = {};
 const doc = {
@@ -124,10 +125,6 @@ Object.defineProperty(globalThis, 'navigator', {
 globalThis.CustomEvent = class { constructor(type, opts) { this.type = type; this.detail = opts?.detail; } };
 globalThis.ImageData = class { constructor(w, h) { this.width = w; this.height = h; this.data = new Uint8ClampedArray(w * h * 4); } };
 globalThis.Image = class {
-    // Decode completes at ~10ms: AFTER extractEXIF has created its
-    // metadata snapshot (~1ms) but BEFORE the slow exifr parse resolves
-    // (~25ms) — the exact interleaving real browsers produce, where
-    // resetForNewImage() runs mid-extraction
     constructor() { this.width = 400; this.height = 300; }
     set src(v) { this._src = v; setTimeout(() => this.onload && this.onload(), 10); }
     get src() { return this._src; }
@@ -142,11 +139,8 @@ globalThis.Tesseract = {
     })
 };
 globalThis.exifr = {
-    // Closer to real exifr output: dates, numbers, GPS, nested objects,
-    // typed arrays (ICC-style), and odd values that must not break the
-    // raw-dump renderer
     parse: async () => {
-        await new Promise(r => setTimeout(r, 25)); // real parses are slow
+        await new Promise(r => setTimeout(r, 25));
         return ({
         Make: 'TestCam', Model: 'X1', Software: '<img src=x onerror=alert(1)>',
         DateTimeOriginal: new Date('2024-01-01'), CreateDate: new Date('2024-01-01'),
@@ -163,11 +157,9 @@ globalThis.Blob = globalThis.Blob || class { constructor(parts) { this.parts = p
 globalThis.URL.createObjectURL = () => 'blob:fake';
 globalThis.URL.revokeObjectURL = () => {};
 
-// ---------- run ----------
 const run = async () => {
     await import('./public/js/app.js');
 
-    // boot the app
     for (const fn of docListeners['DOMContentLoaded'] || []) {
         try { fn(); } catch (err) { failures.push('CONSTRUCTOR threw: ' + err.stack); }
     }
@@ -177,15 +169,12 @@ const run = async () => {
         process.exit(1);
     }
 
-    // ---- flow 1: load an image, expect metadata to populate ----
-    // Use REAL JPEG bytes so the real parseJPEGInternals path runs —
-    // a dummy buffer previously hid that entire code path from testing
     const fs = await import('fs');
     let jpegBytes;
     try {
         jpegBytes = fs.readFileSync(new URL('./test-fixture.jpg', import.meta.url));
     } catch {
-        jpegBytes = Buffer.alloc(16); // fixture missing: degrade gracefully
+        jpegBytes = Buffer.alloc(16);
     }
     const fakeFile = {
         name: 'evidence.jpg', size: jpegBytes.length, type: 'image/jpeg', lastModified: Date.now(),
@@ -195,7 +184,6 @@ const run = async () => {
     imageInput.files = [fakeFile];
     imageInput.dispatch('change', { target: imageInput });
 
-    // let async extractEXIF settle (slow stub parse + hash)
     await new Promise(r => setTimeout(r, 300));
 
     const exifHtml = doc.getElementById('exifContent').innerHTML;
@@ -216,7 +204,6 @@ const run = async () => {
             '\n  innerHTML: ' + JSON.stringify(exifHtml).slice(0, 400));
     }
 
-    // ---- flow 2: split compare drag ----
     doc.getElementById('splitBtn').dispatch('click', {});
     await new Promise(r => setTimeout(r, 10));
 
@@ -241,8 +228,6 @@ const run = async () => {
         failures.push(`SPLIT DRAG FAILED — divider after mousedown: ${afterDown}, after mousemove: ${afterMove}`);
     }
 
-    // ---- flow 3: region OCR (drag a box, expect Tesseract result) ----
-    // exit split view first so routing falls through to region select
     doc.getElementById('splitBtn').dispatch('click', {});
     doc.getElementById('ocrRegionBtn').dispatch('click', {});
     annCanvas.dispatch('mousedown', { button: 0, clientX: 100, clientY: 100 });

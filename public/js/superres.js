@@ -20,26 +20,14 @@
  * so seams from edge artifacts are not visible in the output.
  */
 
+import { applyDenoising, applyCLAHE, applyUnsharpMask } from './filters.js';
+
 const ORT_VERSION = '1.18.0';
 const ORT_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 
-import { applyDenoising, applyCLAHE, applyUnsharpMask } from './filters.js';
-
-// Sub-Pixel CNN (2016) from the ONNX model zoo, served with Git LFS
-// content via media.githubusercontent.com
-export const BUILTIN_MODEL_URL =
+const BUILTIN_MODEL_URL =
     'https://media.githubusercontent.com/media/onnx/models/main/validated/vision/super_resolution/sub_pixel_cnn_2016/model/super-resolution-10.onnx';
 
-// Downloadable higher-quality models. URLs are user-editable in the UI
-// because third-party hosting can move; any mirror of the same .onnx
-// works. Models must take NCHW float32 RGB in [0,1] (fixed or dynamic
-// spatial dims — both are handled).
-//
-// The Real-ESRGAN URL is pinned to an immutable commit: the repo's
-// current main branch no longer carries the raw .onnx (Qualcomm moved
-// release binaries out of the tree), but Hugging Face serves files
-// from any historical revision. Pinning also makes the published
-// SHA-256 below meaningful as an integrity check.
 export const DOWNLOADABLE_MODELS = {
     realesrcompact: {
         label: 'RealESR-general x4v3 (compact)',
@@ -179,14 +167,6 @@ async function cachedModelFetch(url, onStatus, signal, streamProgress = true) {
     return buffer;
 }
 
-export async function clearModelCache() {
-    // Removes all locally cached model files
-    if ('caches' in window) {
-        try { return await caches.delete(MODEL_CACHE); } catch {}
-    }
-    return false;
-}
-
 function tilePositions(extent, tile, step) {
     // Returns tile origins along one axis so tiles of `tile` px cover
     // [0, extent), with the last tile flush against the far edge
@@ -229,11 +209,11 @@ export class SuperResolver {
     constructor() {
         // Holds the loaded inference session and model characteristics
         this.session = null;
-        this.kind = null;       // 'y224' (built-in) | 'rgb' (custom/downloaded)
+        this.kind = null;
         this.scale = null;
         this.label = '';
-        this.fixedTile = null;  // set when the model has a fixed input size
-        this.modelBytes = null; // retained for downloaded models (save-to-disk)
+        this.fixedTile = null;
+        this.modelBytes = null;
         this.filename = 'model.onnx';
     }
 
@@ -299,7 +279,7 @@ export class SuperResolver {
         const ort = await ensureOrtLoaded();
         this.session = await createSession(ort, arrayBuffer);
         this.kind = 'rgb';
-        this.scale = null; // probed on first use
+        this.scale = null;
         this.label = name;
         return this;
     }
@@ -352,7 +332,6 @@ export class SuperResolver {
     async upscaleY(srcCanvas, onProgress, signal = null, opts = {}) {
         // Built-in path: 224x224 luminance tiles, 3x output, color from
         // a bicubic upscale of the same tile (BT.601 YCbCr recombine)
-        const ort = window.ort;
         const tile = 224, overlap = 12, scale = 3;
         const W = srcCanvas.width, H = srcCanvas.height;
 
@@ -369,7 +348,6 @@ export class SuperResolver {
         out.height = H * scale;
         const outCtx = out.getContext('2d');
 
-        // Reusable scratch canvas for the bicubic color upscale
         const colorCanvas = document.createElement('canvas');
         colorCanvas.width = colorCanvas.height = tile * scale;
         const colorCtx = colorCanvas.getContext('2d', { willReadFrequently: true });
@@ -384,7 +362,6 @@ export class SuperResolver {
                 throwIfAborted(signal);
                 const src = pctx.getImageData(tx, ty, tile, tile).data;
 
-                // Luminance plane, normalized to [0,1]
                 const y = new Float32Array(tile * tile);
                 for (let i = 0, p = 0; p < y.length; i += 4, p++) {
                     y[p] = (0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2]) / 255;
@@ -392,7 +369,6 @@ export class SuperResolver {
 
                 const { planes: [outY], size: oTile } = await this.runTilePlanes([y], tile, opts.ensemble);
 
-                // Chrominance from a smooth upscale of the same region
                 colorCtx.drawImage(padded, tx, ty, tile, tile, 0, 0, oTile, oTile);
                 const cImg = colorCtx.getImageData(0, 0, oTile, oTile);
                 const c = cImg.data;
@@ -457,12 +433,10 @@ export class SuperResolver {
         }
         this.scale = scale;
 
-        // Second probe at a different size distinguishes dynamic dims
-        // from a fixed input shape
         const altSize = workingSize === 64 ? 128 : 64;
         try {
             await tryRun(altSize);
-            this.fixedTile = null; // dynamic — free tile choice
+            this.fixedTile = null;
         } catch {
             this.fixedTile = workingSize;
         }
@@ -473,7 +447,6 @@ export class SuperResolver {
         // Custom path: NCHW float32 RGB in [0,1], tiled. Tile size is
         // free for dynamic-dim models, or locked to the model's fixed
         // input size when probing detected one.
-        const ort = window.ort;
         if (!this.scale) await this.probeScale();
         const scale = this.scale;
         const tile = this.fixedTile || 128;
@@ -503,7 +476,6 @@ export class SuperResolver {
                 throwIfAborted(signal);
                 const src = pctx.getImageData(tx, ty, tile, tile).data;
 
-                // Planar RGB in [0,1]
                 const rP = new Float32Array(plane);
                 const gP = new Float32Array(plane);
                 const bP = new Float32Array(plane);
@@ -552,26 +524,6 @@ export class SuperResolver {
         );
     }
 }
-
-/* ============================================================
-   TEXT / PLATE MODE
-   Domain-specific processing around the neural upscale, tuned for
-   license plates, signage, and screen text:
-
-   1. PRE  — 3x3 median denoise + chroma-only smoothing. Sensor and
-      compression noise is the main thing SR models amplify into fake
-      strokes; chroma noise in particular contributes nothing to
-      legibility and is safe to suppress aggressively.
-   2. SR   — the neural upscale (any loaded model).
-   3. IBP  — iterative back-projection: the result is repeatedly
-      downscaled, compared against the true source, and the residual
-      is projected back up. This enforces "the upscale must actually
-      explain the observed pixels", measurably tightening stroke edges
-      and suppressing hallucinated detail — exactly the failure mode
-      that matters for forensic reading of characters.
-   4. POST — gentle CLAHE for stroke/background separation plus a
-      small-radius unsharp mask tuned for character edges.
-   ============================================================ */
 
 export function preprocessForText(canvas) {
     // Median-denoises and smooths chroma in place before inference
@@ -650,7 +602,6 @@ export async function backProject(srcCanvas, upCanvas, iterations = 2, alpha = 0
 
     const upCtx = upCanvas.getContext('2d', { willReadFrequently: true });
 
-    // Scratch canvas for high-quality downscaling
     const down = document.createElement('canvas');
     down.width = W;
     down.height = H;
@@ -664,7 +615,6 @@ export async function backProject(srcCanvas, upCanvas, iterations = 2, alpha = 0
         downCtx.drawImage(upCanvas, 0, 0, UW, UH, 0, 0, W, H);
         const downData = downCtx.getImageData(0, 0, W, H).data;
 
-        // Residual in source space (signed, per RGB channel)
         const res = new Float32Array(W * H * 3);
         for (let i = 0, p = 0; p < W * H; i += 4, p++) {
             res[p * 3] = srcData[i] - downData[i];
@@ -672,7 +622,6 @@ export async function backProject(srcCanvas, upCanvas, iterations = 2, alpha = 0
             res[p * 3 + 2] = srcData[i + 2] - downData[i + 2];
         }
 
-        // Project the residual up with bilinear sampling and add
         const upImg = upCtx.getImageData(0, 0, UW, UH);
         const u = upImg.data;
         for (let y = 0; y < UH; y++) {
@@ -715,18 +664,7 @@ export function postprocessForText(canvas) {
     ctx.putImageData(img, 0, 0);
 }
 
-/* ============================================================
-   SELF-ENSEMBLE (x8 test-time augmentation)
-   Standard SR quality technique: each tile is inferred 8 times — the
-   4 rotations of the original and of its mirror — outputs are
-   inverse-transformed back and averaged. Averaging cancels the
-   orientation-dependent component of model error, giving a measurable
-   PSNR gain at 8x the compute. Transforms are exact index remappings
-   on square planes (no resampling), so the ensemble itself introduces
-   zero interpolation loss.
-   ============================================================ */
-
-export function rotatePlane90(plane, n) {
+function rotatePlane90(plane, n) {
     // Rotates an n x n plane 90 degrees clockwise: out(x,y) = in(y, n-1-x)
     const out = new Float32Array(n * n);
     for (let y = 0; y < n; y++) {
@@ -737,7 +675,7 @@ export function rotatePlane90(plane, n) {
     return out;
 }
 
-export function flipPlaneH(plane, n) {
+function flipPlaneH(plane, n) {
     // Mirrors an n x n plane horizontally
     const out = new Float32Array(n * n);
     for (let y = 0; y < n; y++) {
@@ -748,7 +686,7 @@ export function flipPlaneH(plane, n) {
     return out;
 }
 
-export function transformPlane(plane, n, k, flip) {
+function transformPlane(plane, n, k, flip) {
     // Forward TTA transform: optional horizontal flip, then k clockwise
     // 90-degree rotations
     let p = flip ? flipPlaneH(plane, n) : plane;
@@ -756,14 +694,14 @@ export function transformPlane(plane, n, k, flip) {
     return p;
 }
 
-export function inverseTransformPlane(plane, n, k, flip) {
+function inverseTransformPlane(plane, n, k, flip) {
     // Exact inverse of transformPlane: undo rotations first, then flip
     let p = plane;
     for (let i = 0; i < (4 - k) % 4; i++) p = rotatePlane90(p, n);
     return flip ? flipPlaneH(p, n) : p;
 }
 
-export const TTA_VARIANTS = [
+const TTA_VARIANTS = [
     { k: 0, flip: false }, { k: 1, flip: false }, { k: 2, flip: false }, { k: 3, flip: false },
     { k: 0, flip: true },  { k: 1, flip: true },  { k: 2, flip: true },  { k: 3, flip: true }
 ];

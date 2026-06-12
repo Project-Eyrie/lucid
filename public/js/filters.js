@@ -119,8 +119,6 @@ export function equalizeHistogram(data) {
     for (let i = 0; i < data.length; i += 4) {
         const gray = Math.round(0.2989 * data[i] + 0.5870 * data[i + 1] + 0.1140 * data[i + 2]);
         const newVal = Math.round(((cdf[gray] - min) / (pixels - min)) * 255);
-        // Clamp the scale ratio: unbounded ratios on near-black pixels
-        // (gray ~ 0) blow individual channels out and distort hue badly
         const ratio = Math.min(4, newVal / (gray || 1));
         data[i] = Math.min(255, data[i] * ratio);
         data[i + 1] = Math.min(255, data[i + 1] * ratio);
@@ -242,7 +240,6 @@ export function applyCLAHE(data, width, height, clipLimit = 2.5, tiles = 8) {
         luma[p] = Math.round(0.2989 * data[i] + 0.5870 * data[i + 1] + 0.1140 * data[i + 2]);
     }
 
-    // Build one clipped-equalization LUT per tile
     const luts = [];
     for (let ty = 0; ty < tiles; ty++) {
         luts.push([]);
@@ -261,7 +258,6 @@ export function applyCLAHE(data, width, height, clipLimit = 2.5, tiles = 8) {
             const tilePixels = (x1 - x0) * (y1 - y0) || 1;
             const limit = Math.max(1, Math.round((clipLimit * tilePixels) / nBins));
 
-            // Clip the histogram and redistribute the excess uniformly
             let excess = 0;
             for (let b = 0; b < nBins; b++) {
                 if (hist[b] > limit) {
@@ -280,7 +276,6 @@ export function applyCLAHE(data, width, height, clipLimit = 2.5, tiles = 8) {
         }
     }
 
-    // Bilinearly interpolate between tile mappings per pixel
     for (let y = 0; y < height; y++) {
         const gy = (y - tileH / 2) / tileH;
         const ty0 = Math.max(0, Math.min(tiles - 1, Math.floor(gy)));
@@ -301,7 +296,6 @@ export function applyCLAHE(data, width, height, clipLimit = 2.5, tiles = 8) {
                 luts[ty1][tx0][l] * (1 - fx) * fy +
                 luts[ty1][tx1][l] * fx * fy;
 
-            // Scale RGB by the luminance ratio (clamped) to preserve hue
             const ratio = Math.min(4, mapped / (l || 1));
             const i = p * 4;
             data[i] = Math.min(255, data[i] * ratio);
@@ -332,8 +326,9 @@ export function applyUnsharpMask(data, width, height, amount, radius = 2, thresh
 
 function blurWorking(data, width, height, radius) {
     // 3-pass box blur on a working buffer (approximates a Gaussian)
+    const temp = new Uint8ClampedArray(data.length);
     for (let pass = 0; pass < 3; pass++) {
-        const temp = new Uint8ClampedArray(data);
+        temp.set(data);
 
         for (let y = 0; y < height; y++) {
             let r = 0, g = 0, b = 0, count = 0;
@@ -432,20 +427,25 @@ export function applyDehaze(data, width, height, strength = 0.85) {
         dark[p] = dark[p + 1] = dark[p + 2] = m;
         dark[p + 3] = 255;
     }
-    // Smooth the dark channel as a cheap stand-in for the patch minimum
     blurWorking(dark, width, height, Math.max(3, Math.round(Math.min(width, height) / 100)));
 
-    // Atmospheric light: average color of the 0.1% haziest pixels
-    const samples = [];
-    for (let p = 0; p < n; p++) samples.push([dark[p * 4], p]);
-    samples.sort((a, b) => b[0] - a[0]);
+    const hist = new Uint32Array(256);
+    for (let p = 0; p < n; p++) hist[dark[p * 4]]++;
     const top = Math.max(1, Math.floor(n * 0.001));
-    let aR = 0, aG = 0, aB = 0;
-    for (let s = 0; s < top; s++) {
-        const i = samples[s][1] * 4;
-        aR += data[i]; aG += data[i + 1]; aB += data[i + 2];
+    let threshold = 255, seen = 0;
+    while (threshold > 0 && seen + hist[threshold] < top) {
+        seen += hist[threshold];
+        threshold--;
     }
-    aR /= top; aG /= top; aB /= top;
+    let aR = 0, aG = 0, aB = 0, count = 0;
+    for (let p = 0; p < n && count < top; p++) {
+        if (dark[p * 4] >= threshold) {
+            const i = p * 4;
+            aR += data[i]; aG += data[i + 1]; aB += data[i + 2];
+            count++;
+        }
+    }
+    aR /= count; aG /= count; aB /= count;
     const aMax = Math.max(aR, aG, aB, 1);
 
     for (let p = 0; p < n; p++) {

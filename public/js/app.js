@@ -40,22 +40,16 @@ class ImageForensicsTool {
         this.spacePressed = false;
         this.colorPickerActive = false;
 
-        // Ordered list of applied destructive filters; the render
-        // pipeline replays these from the original image every time, so
-        // filters, blurs, and enhancements always compose consistently
-        // and are individually undoable.
         this.appliedFilters = [];
-        this.elaActive = false;
         this.comparing = false;
-        this.perspectivePoints = null; // null = inactive, [] = collecting
-        this.superResolver = null;     // lazy: built on first use
+        this.perspectivePoints = null;
+        this.superResolver = null;
         this.srBusy = false;
-        this.srAbort = null;           // AbortController for the active SR run
-        this.compareSource = null;     // pre-upscale image for A/B vs bicubic
+        this.srAbort = null;
+        this.compareSource = null;
         this.splitCompare = { active: false, pos: 0.5, dragging: false };
-        this.ocrRegionSelect = null;   // {start} while drag-selecting an OCR region
-        this.reportMeta = null;        // structured metadata captured for case reports
-        this.currentFile = null;
+        this.ocrRegionSelect = null;
+        this.reportMeta = null;
         this.prefs = loadPrefs();
 
         this.magnifierSettings = {
@@ -81,7 +75,7 @@ class ImageForensicsTool {
         this.history.onChange = () => this.updateHistoryUI();
 
         this.magnifier = new Magnifier(this.magnifierCanvas, this.magnifierCtx, this.magnifierSettings);
-        this.annotations = new AnnotationManager(this.annotationCanvas, this.annotationCtx, this.canvas, this.ctx);
+        this.annotations = new AnnotationManager(this.annotationCanvas, this.annotationCtx, this.canvas);
         this.annotations.onAction = (action) => this.recordAnnotationAction(action);
         this.transform = new TransformManager(this.canvas, this.annotationCanvas, this.overlayCanvas);
         this.applyEnhancementsDebounced = debounce(() => this.applyEnhancements(), 50);
@@ -377,7 +371,6 @@ class ImageForensicsTool {
                 document.getElementById('togglePicker')?.classList.add('active');
             }
 
-            // Single-key annotation tool selection
             const toolKeys = { r: 'rect', c: 'circle', b: 'blur', t: 'text', l: 'line', u: 'measure' };
             if (toolKeys[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
@@ -406,14 +399,11 @@ class ImageForensicsTool {
                 this.redo();
             }
 
-            // Hold backslash to flash the unmodified original (before/after)
             if (e.key === '\\' && !this.comparing) {
                 e.preventDefault();
                 this.startCompare();
             }
 
-            // Only hijack Space when nothing focusable holds focus —
-            // otherwise it breaks keyboard activation of buttons/checkboxes
             if (e.key === ' ' && (e.target === document.body || e.target.tagName === 'CANVAS')) {
                 e.preventDefault();
                 this.spacePressed = true;
@@ -437,8 +427,6 @@ class ImageForensicsTool {
             btn.classList.toggle('active', visible);
             this.updateAnnotationVisibilityUI();
             this.overlayCanvas.style.opacity = visible ? '1' : '0';
-            // Re-render the full pipeline: when hidden, blurs are simply
-            // not applied; when shown they are recomputed from live pixels
             this.applyEnhancements();
         });
 
@@ -527,9 +515,6 @@ class ImageForensicsTool {
             const newZoom = Math.max(10, Math.min(500, currentZoom + delta));
             if (newZoom === currentZoom) return;
 
-            // Keep the image point under the cursor fixed: the transformed
-            // bounding rect's center equals layoutCenter + pan, so the pan
-            // correction is proportional to the cursor's offset from it
             const rect = this.canvas.getBoundingClientRect();
             const cx = rect.left + rect.width / 2;
             const cy = rect.top + rect.height / 2;
@@ -602,7 +587,6 @@ class ImageForensicsTool {
         document.getElementById('runOcr')?.addEventListener('click', () => this.runOCR());
         document.getElementById('copyOcrText')?.addEventListener('click', () => this.copyOcrText());
 
-        // Drag & drop image loading onto the canvas area
         wrapper.addEventListener('dragover', (e) => {
             e.preventDefault();
             wrapper.classList.add('drag-over');
@@ -619,11 +603,9 @@ class ImageForensicsTool {
             }
         });
 
-        // Fit / 1:1 zoom buttons
         document.getElementById('zoomFit')?.addEventListener('click', () => this.zoomToFit());
         document.getElementById('zoomActual')?.addEventListener('click', () => this.setZoomTo(100));
 
-        // Before/after compare (hold)
         const compareBtn = document.getElementById('compareBtn');
         if (compareBtn) {
             compareBtn.addEventListener('mousedown', () => this.startCompare());
@@ -632,7 +614,6 @@ class ImageForensicsTool {
                 compareBtn.addEventListener(ev, () => this.endCompare()));
         }
 
-        // Forensics: Error Level Analysis
         document.getElementById('elaQuality')?.addEventListener('input', (e) => {
             e.target.parentElement.querySelector('.value').textContent = e.target.value + '%';
         });
@@ -642,10 +623,8 @@ class ImageForensicsTool {
         document.getElementById('runEla')?.addEventListener('click', () => this.runELA());
         document.getElementById('exitEla')?.addEventListener('click', () => this.exitELA());
 
-        // Perspective correction
         document.getElementById('perspectiveBtn')?.addEventListener('click', () => this.togglePerspective());
 
-        // ML super-resolution
         document.getElementById('srModel')?.addEventListener('change', (e) => {
             const choice = e.target.value;
             document.getElementById('srCustomRow').style.display = choice === 'custom' ? 'flex' : 'none';
@@ -661,7 +640,7 @@ class ImageForensicsTool {
                 }
             }
             document.getElementById('saveSrModel')?.classList.add('hidden');
-            this.superResolver = null; // force re-init on model switch
+            this.superResolver = null;
         });
         document.getElementById('srModelUrl')?.addEventListener('input', (e) => {
             e.target.dataset.userEdited = '1';
@@ -690,7 +669,6 @@ class ImageForensicsTool {
             }
         });
 
-        // Persist UI preferences
         ['magLevel', 'magSize', 'magEnhance', 'magGrid', 'magPixelInfo', 'magCrosshair'].forEach(id => {
             document.getElementById(id)?.addEventListener('change', () => {
                 const m = this.magnifierSettings;
@@ -824,7 +802,6 @@ class ImageForensicsTool {
         // extraction runs immediately and independently of decoding, so
         // formats the browser cannot render (HEIC, TIFF) still yield
         // their hash and EXIF data instead of failing silently.
-        this.currentFile = file;
         this.extractEXIF(file);
 
         const reader = new FileReader();
@@ -854,7 +831,6 @@ class ImageForensicsTool {
         // Loads image from a Blob (paste, clipboard, URL fetch). Blobs
         // fetched from URLs retain their metadata, so the full EXIF path
         // runs here too — previously URL loads never showed any EXIF.
-        this.currentFile = blob;
         this.extractEXIF(blob, sourceLabel);
 
         const reader = new FileReader();
@@ -900,6 +876,19 @@ class ImageForensicsTool {
         this.canvas.height = this.annotationCanvas.height = this.overlayCanvas.height = this.originalImage.height;
         this.syncAnnotationCanvas();
         this.magnifierCanvas.width = this.magnifierCanvas.height = this.magnifierSettings.size;
+        this.animateImageArrival();
+    }
+
+    animateImageArrival() {
+        // Plays a brief reveal animation on the main canvas whenever the
+        // working image changes (load, crop, warp, upscale)
+        const wrapper = document.querySelector('.canvas-wrapper');
+        if (!wrapper) return;
+        wrapper.classList.remove('image-arrive');
+        void wrapper.offsetWidth;
+        wrapper.classList.add('image-arrive');
+        clearTimeout(this._arriveTimer);
+        this._arriveTimer = setTimeout(() => wrapper.classList.remove('image-arrive'), 650);
     }
 
     syncAnnotationCanvas() {
@@ -940,7 +929,6 @@ class ImageForensicsTool {
         // source, undoing any step or toggling visibility can never
         // leave stale pixels behind.
         if (!this.originalImage || this.comparing) return;
-        this.elaActive = false;
         document.getElementById('exitEla')?.classList.add('hidden');
         this.drawImage();
 
@@ -963,7 +951,6 @@ class ImageForensicsTool {
 
         processEnhancements(this.imageData, eff, this.canvas.width, this.canvas.height, curvesLUT);
 
-        // Replay destructive filters in application order
         const w = this.canvas.width, h = this.canvas.height;
         for (const type of this.appliedFilters) {
             this.runFilter(type, this.imageData.data, w, h);
@@ -1063,7 +1050,6 @@ class ImageForensicsTool {
                     this.applyEnhancements();
                 }
             });
-            // Render the new blur through the live pipeline immediately
             this.applyEnhancements();
         }
     }
@@ -1111,8 +1097,6 @@ class ImageForensicsTool {
         if (btn) { btn.disabled = true; btn.textContent = 'ANALYZING...'; }
 
         try {
-            // Analyze the unmodified original so enhancement settings
-            // don't contaminate the error levels
             const srcCanvas = document.createElement('canvas');
             srcCanvas.width = this.canvas.width;
             srcCanvas.height = this.canvas.height;
@@ -1121,7 +1105,6 @@ class ImageForensicsTool {
             const elaData = await computeELA(srcCanvas, quality, amplify);
             this.ctx.putImageData(elaData, 0, 0);
             this.imageData = elaData;
-            this.elaActive = true;
             this.updateHistogram();
             document.getElementById('exitEla')?.classList.remove('hidden');
             showToast('ELA view active — uniform noise is normal; bright, sharply-bounded regions warrant a closer look.', 'info', 6000);
@@ -1134,7 +1117,6 @@ class ImageForensicsTool {
 
     exitELA() {
         // Leaves the ELA view and restores the normal pipeline
-        this.elaActive = false;
         this.applyEnhancements();
     }
 
@@ -1175,7 +1157,6 @@ class ImageForensicsTool {
 
         this.perspectivePoints.push({ x, y });
 
-        // Marker feedback
         const ctx = this.annotationCtx;
         const scale = this.annotations.getScaleFactor();
         ctx.save();
@@ -1335,7 +1316,6 @@ class ImageForensicsTool {
         this.ctx.drawImage(baseline, 0, 0, W, H);
         this.ctx.restore();
 
-        // Divider with grab handle
         this.ctx.save();
         const lw = Math.max(2, Math.round(W / 500));
         this.ctx.fillStyle = '#78e030';
@@ -1350,7 +1330,6 @@ class ImageForensicsTool {
         this.ctx.textBaseline = 'middle';
         this.ctx.fillText('\u2194', splitX, H / 2);
 
-        // Corner labels
         const fs = Math.max(10, Math.round(W / 70));
         this.ctx.font = `bold ${fs}px 'JetBrains Mono', monospace`;
         this.ctx.textBaseline = 'top';
@@ -1466,19 +1445,16 @@ class ImageForensicsTool {
         const meta = this.reportMeta || {};
         const now = new Date();
 
-        // Images
         const origDataUrl = await this.reportImageDataUrl(this.originalImage);
         const workCanvas = this.createExportCanvas(true);
         const workDataUrl = await this.reportImageDataUrl(workCanvas);
 
-        // Hash of the current working render (full resolution)
         let workHash = 'unavailable';
         try {
             const blob = await new Promise(r => workCanvas.toBlob(r, 'image/png'));
             workHash = await this.computeImageHash(await blob.arrayBuffer());
         } catch {}
 
-        // Processing record
         const historyRows = this.history.entries()
             .map((label, i) => `<tr><td>${i + 1}</td><td>${esc(label)}</td></tr>`).join('') ||
             '<tr><td colspan="2">No operations recorded</td></tr>';
@@ -1496,7 +1472,6 @@ class ImageForensicsTool {
         const annSummary = Object.entries(annCounts).map(([t, n]) => `${esc(t)}: ${n}`).join(', ') || 'none';
         const blurCount = this.annotations.blurRegions.length;
 
-        // Metadata tables from the structured capture
         const exifRows = meta.exif
             ? Object.entries(meta.exif)
                 .filter(([, v]) => typeof v !== 'object' || v instanceof Date)
@@ -1611,7 +1586,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         const modelChoice = document.getElementById('srModel')?.value || 'builtin';
         const ensemble = (document.getElementById('srQuality')?.value === 'max');
 
-        // Neural upscaling cost grows with area; protect the tab.
         if (W * H > 2048 * 2048) {
             showToast('Image is too large for in-browser super-resolution (max ~4 MP). Crop to the region of interest first.', 'warning', 6000);
             return;
@@ -1634,7 +1608,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         document.getElementById('cancelSuperRes')?.classList.remove('hidden');
 
         try {
-            // Initialize (or reuse) the requested model
             if (!this.superResolver) {
                 this.setSrProgress('Loading ONNX Runtime...', 0);
                 const resolver = new SuperResolver();
@@ -1653,9 +1626,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
                 } else if (DOWNLOADABLE_MODELS[modelChoice]) {
                     const def = DOWNLOADABLE_MODELS[modelChoice];
                     const url = document.getElementById('srModelUrl')?.value?.trim() || def.url;
-                    // Integrity check only applies to the pinned default
-                    // URL — a user-supplied mirror may be a different
-                    // (legitimate) build of the same model
                     const expectedHash = url === def.url ? def.sha256 : null;
                     await resolver.loadFromUrl(url, def.label, def.filename,
                         (status, fraction) => this.setSrProgress(status, fraction ?? 0), expectedHash, signal);
@@ -1669,8 +1639,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             }
             const scale = this.superResolver.scale;
 
-            // Run on the unmodified working image, like ELA: enhancement
-            // settings stay non-destructive and re-apply to the result
             let current = document.createElement('canvas');
             current.width = W;
             current.height = H;
@@ -1685,7 +1653,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
 
             for (let pass = 1; pass <= passes; pass++) {
                 checkCancel();
-                // Re-check area before each pass: 2-pass at 3x is 9x total
                 if (current.width * current.height * scale * scale > 2048 * 2048 * 1.2) {
                     showToast(`Stopped after pass ${pass - 1}: the next pass would exceed the in-browser size limit.`, 'warning', 5000);
                     break;
@@ -1696,10 +1663,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
                     this.setSrProgress(`Processing tile ${done}/${total}${passLabel}...`, done / total);
                 }, signal, { ensemble });
 
-                // Back-projection: enforce that downscaling the result
-                // reproduces the actual observed pixels. In TEXT mode
-                // this is the key anti-hallucination step; in GENERAL
-                // mode one light iteration still tightens edges.
                 const ibpIterations = mode === 'text' ? 3 : 1;
                 await backProject(current, result, ibpIterations, 0.75, (it, total) => {
                     this.setSrProgress(`Back-projection ${it}/${total}${passLabel}...`, it / total);
@@ -1717,16 +1680,13 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             this.setSrProgress('Finalizing...', 1);
             const totalScale = Math.round(current.width / W);
             const modeLabel = (mode === 'text' ? ', text/plate mode' : '') + (ensemble ? ', x8 ensemble' : '');
-            this.compareSource = this.originalImage; // A/B baseline: pre-upscale image
+            this.compareSource = this.originalImage;
             this.swapWorkingImage(current.toDataURL(), `Super-resolution (${totalScale}x, ${this.superResolver.label}${modeLabel})`, { keepCompareSource: true });
             document.getElementById('srOcrBtn')?.classList.remove('hidden');
             showToast(`Upscaled ${W}\u00D7${H} \u2192 ${current.width}\u00D7${current.height} with ${this.superResolver.label}${modeLabel}. Use SPLIT in the header to compare against bicubic; Ctrl+Z to revert.`, 'success', 6000);
         } catch (err) {
             const cancelled = err?.cancelled || err?.name === 'AbortError';
             if (cancelled) {
-                // No partial result is ever committed; the working image
-                // is untouched. A fully-loaded model survives the cancel
-                // so the next run skips the download.
                 showToast('Super-resolution cancelled. Nothing was changed.', 'info', 3500);
                 if (!this.superResolver?.session) this.superResolver = null;
             } else {
@@ -1898,7 +1858,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
     }
 
     switchTab(e) {
-        // Switches between control panel tabs
         document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
         e.target.classList.add('active');
         document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.remove('active'));
@@ -1941,12 +1900,10 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         // Resets entire application state
         this.originalImage = null;
         this.imageData = null;
-        this.currentFile = null;
         this.watermarkSettings = null;
         this.captionSettings = null;
         this.colorPickerActive = false;
         this.comparing = false;
-        this.elaActive = false;
         this.compareSource = null;
         this.splitCompare = { active: false, pos: 0.5, dragging: false };
         document.getElementById('splitBtn')?.classList.remove('active');
@@ -2003,17 +1960,11 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         this.captionSettings = null;
         this.colorPickerActive = false;
         this.comparing = false;
-        this.elaActive = false;
         this.compareSource = null;
         this.splitCompare = { active: false, pos: 0.5, dragging: false };
         document.getElementById('splitBtn')?.classList.remove('active');
         this.cancelOcrRegionSelect(true);
         this.cancelPerspective();
-        // NOTE: this.reportMeta is deliberately NOT cleared here.
-        // resetForNewImage() runs from img.onload, which races the
-        // already-in-flight extractEXIF for the same file; nulling the
-        // snapshot mid-extraction crashed metadata display whenever the
-        // image decoded before the (slow) exifr parse resolved.
         document.getElementById('exitEla')?.classList.add('hidden');
         document.getElementById('srOcrBtn')?.classList.add('hidden');
         this.history.clear();
@@ -2246,10 +2197,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             ` <button class="copy-meta-btn" data-copy="${escapeHtml(imageHash)}" title="Copy hash">COPY</button></td></tr>`;
         html += '</table></div>';
 
-        // Structured capture for the case report exporter. Built as a
-        // local and published to the instance; later writes go through
-        // the local reference so concurrent resets can never null it
-        // out from under this async function.
         const meta = {
             sourceLabel: sourceLabel || null,
             fileName: file.name || null,
@@ -2265,8 +2212,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         let exifData = null;
         let parseError = null;
         try {
-            // Full option set: the full exifr build parses PNG/TIFF
-            // containers plus IPTC and ICC blocks the lite build lacked
             exifData = await exifr.parse(file, {
                 translateKeys: true,
                 translateValues: true,
@@ -2284,8 +2229,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         if (exifData && Object.keys(exifData).length > 0) {
             const cameraFields = ['Make', 'Model', 'LensModel', 'Software'];
             const settingsFields = ['ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'Flash', 'WhiteBalance', 'Orientation'];
-            // exifr translates tag 0x0132 (DateTime) to ModifyDate and
-            // DateTimeDigitized to CreateDate — the old names never matched
             const dateFields = ['DateTimeOriginal', 'CreateDate', 'ModifyDate', 'OffsetTimeOriginal'];
 
             const cameraData = this.filterExifFields(exifData, cameraFields);
@@ -2324,7 +2267,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
                 </div>`;
             }
 
-            // Collapsible raw dump of every parsed field
             const rawRows = Object.entries(exifData)
                 .filter(([, v]) => typeof v !== 'object' || v instanceof Date)
                 .map(([k, v]) => {
@@ -2344,7 +2286,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             html += '<div class="meta-section"><h4>EXIF DATA</h4><p class="no-data">No EXIF data present in this file</p></div>';
         }
 
-        // JPEG internals: quantization tables fingerprint the encoder
         try {
         if (arrayBuffer) {
             const jpeg = parseJPEGInternals(arrayBuffer);
@@ -2384,8 +2325,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             });
         });
 
-        // Embedded EXIF thumbnail: appended asynchronously; a thumbnail
-        // that doesn't match the main image betrays post-capture editing
         this.appendEmbeddedThumbnail(file, el);
     }
 
@@ -2405,7 +2344,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
     }
 
     formatFileSize(bytes) {
-        // Converts bytes to human-readable size string
         if (bytes === 0) return '0 Bytes';
         const k = 1024;
         const sizes = ['Bytes', 'KB', 'MB', 'GB'];
@@ -2494,24 +2432,19 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
 
         const clampVal = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-        // Adaptive building blocks ------------------------------------
         const autoGamma = (stats, targetLuma, lo, hi) => {
-            // Gamma that maps the median luminance onto targetLuma
             const m = clampVal(stats.median, 4, 250) / 255;
             return clampVal(Math.log(m) / Math.log(targetLuma / 255), lo, hi);
         };
         const autoContrast = (stats, targetSpread, strength, max) => {
-            // Contrast proportional to how compressed the histogram is
             const spread = Math.max(8, stats.p99 - stats.p1);
             return clampVal((targetSpread - spread) * strength, 0, max);
         };
         const autoBrightness = (stats, strength, max) => {
-            // Recenters the histogram midpoint toward 128
             const mid = (stats.p1 + stats.p99) / 2;
             return clampVal(((128 - mid) / 2.55) * strength, -max, max);
         };
         const autoBalance = (stats, strength, max) => {
-            // Gray-world channel shifts mapped onto the balance sliders
             const avg = (stats.rMean + stats.gMean + stats.bMean) / 3;
             return {
                 balanceR: clampVal((avg - stats.rMean) * strength, -max, max),
@@ -2520,11 +2453,8 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             };
         };
 
-        // Preset definitions: static objects or stats-driven functions -
         const presets = {
             auto: (s) => ({
-                // Smart auto: exposure + contrast + white balance, all
-                // measured from this image rather than fixed numbers
                 gamma: autoGamma(s, 118, 0.65, 1.9),
                 contrast: autoContrast(s, 220, 0.35, 35),
                 brightness: autoBrightness(s, 0.3, 15),
@@ -2533,7 +2463,6 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
                 ...autoBalance(s, 0.7, 35)
             }),
             levels: (s) => ({
-                // Pure tonal stretch (no color changes)
                 gamma: autoGamma(s, 122, 0.7, 1.8),
                 contrast: autoContrast(s, 250, 0.5, 45),
                 brightness: autoBrightness(s, 0.5, 25),
@@ -2541,13 +2470,11 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
                 sharpen: 0
             }),
             color: (s) => ({
-                // Cast correction only
                 brightness: 0, contrast: 0, gamma: 1.0, sharpen: 0,
                 saturation: 5,
                 ...autoBalance(s, 0.9, 45)
             }),
             lowlight: (s) => ({
-                // Shadow lift scaled to how dark the image actually is
                 gamma: autoGamma(s, 140, 1.0, 2.2),
                 brightness: clampVal((90 - s.median) / 2.55 * 0.4, 0, 30),
                 contrast: 15,
@@ -3113,7 +3040,8 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => {
             splash.classList.add('fade-out');
             splash.addEventListener('transitionend', () => splash.remove());
-        }, 1400);
+            setTimeout(() => splash.remove(), 1200);
+        }, 2150);
     }
     new ImageForensicsTool();
 });

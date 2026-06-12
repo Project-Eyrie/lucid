@@ -16,9 +16,22 @@
 </head>
 <body>
     <div id="splashScreen" class="splash-screen">
+        <div class="splash-grid"></div>
         <div class="splash-content">
-            <img src="lucid-logo.png" alt="Lucid" class="splash-logo">
-            <div class="splash-text">Lucid</div>
+            <div class="splash-logo-wrap">
+                <img src="lucid-logo.png" alt="Lucid" class="splash-logo">
+                <div class="splash-scanline"></div>
+                <div class="splash-ring"></div>
+            </div>
+            <div class="splash-text" aria-label="Lucid">
+                <span style="--i:0">L</span><span style="--i:1">U</span><span style="--i:2">C</span><span style="--i:3">I</span><span style="--i:4">D</span><span class="splash-caret"></span>
+            </div>
+            <div class="splash-sub">FORENSIC IMAGE ANALYSIS</div>
+            <div class="splash-boot">
+                <span class="boot-line" style="--i:0">&#9656; LOADING ANALYSIS MODULES</span>
+                <span class="boot-line" style="--i:1">&#9656; VERIFYING INTEGRITY</span>
+                <span class="boot-line boot-ready" style="--i:2">&#9656; READY</span>
+            </div>
             <div class="splash-bar"><div class="splash-bar-fill"></div></div>
         </div>
     </div>

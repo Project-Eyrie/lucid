@@ -7,11 +7,18 @@
  * models) are cached on first successful fetch. After one online
  * session, Lucid works with the network unplugged — a meaningful
  * property when handling evidence images.
+ *
+ * VERSION must be bumped on every release: activation deletes all
+ * older versioned caches, so a deployed update can never be masked by
+ * a stale shell (the model cache is version-independent and kept).
+ * The app shell is served network-first — fresh code always wins when
+ * online; the cache only answers when the network is unavailable.
+ * RUNTIME_HOSTS lists third-party origins whose immutable, versioned
+ * assets are safe to cache-first: CDN libraries, model hosting, and
+ * OCR language data. Opaque (no-cors) responses are cached too, which
+ * is required for offline replay of plain script-tag loads.
  */
 
-// Bump VERSION on every release: activation deletes all older
-// versioned caches, so a deployed update can never be masked by a
-// stale shell (the model cache is version-independent and preserved).
 const VERSION = 'v2';
 const SHELL_CACHE = 'lucid-shell-' + VERSION;
 const RUNTIME_CACHE = 'lucid-runtime-' + VERSION;
@@ -37,8 +44,6 @@ const SHELL_ASSETS = [
     './js/utils.js'
 ];
 
-// Third-party hosts whose immutable, versioned assets are safe to
-// cache-first: the CDN libraries, model hosting, and OCR data.
 const RUNTIME_HOSTS = [
     'cdn.jsdelivr.net',
     'media.githubusercontent.com',
@@ -77,11 +82,6 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(req.url);
 
     if (url.origin === self.location.origin) {
-        // App shell: NETWORK-FIRST. Fresh code always wins when online
-        // (cache is refreshed from the response); the cache only serves
-        // when the network is unavailable — i.e. true offline mode.
-        // Cache-first here previously caused updates to be masked by a
-        // stale shell, which is unacceptable for an evidence tool.
         event.respondWith(
             fetch(req).then(resp => {
                 if (resp.ok) {
@@ -95,12 +95,8 @@ self.addEventListener('fetch', (event) => {
     }
 
     if (isRuntimeHost(url)) {
-        // Versioned/pinned third-party assets: cache-first
         event.respondWith(
             caches.match(req).then(hit => hit || fetch(req).then(resp => {
-                // Opaque responses (no-cors script/asset loads) are
-                // cacheable too — required for offline replay of CDN
-                // scripts loaded without crossorigin attributes
                 if (resp.ok || resp.type === 'opaque') {
                     const clone = resp.clone();
                     caches.open(RUNTIME_CACHE).then(c => c.put(req, clone));

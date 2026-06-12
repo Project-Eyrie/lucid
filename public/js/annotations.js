@@ -16,12 +16,11 @@ import { getCanvasCoordinates } from './utils.js';
 import { applyBlur } from './filters.js';
 
 export class AnnotationManager {
-    constructor(canvas, ctx, mainCanvas, mainCtx) {
+    constructor(canvas, ctx, mainCanvas) {
         // Initializes annotation state and canvas references
         this.canvas = canvas;
         this.ctx = ctx;
         this.mainCanvas = mainCanvas;
-        this.mainCtx = mainCtx;
         this.annotations = [];
         this.blurRegions = [];
         this.currentTool = 'select';
@@ -30,7 +29,7 @@ export class AnnotationManager {
         this.startY = 0;
         this.visible = true;
         this.tabActive = true;
-        this.onAction = null; // callback({ type, data }) for the history stack
+        this.onAction = null;
     }
 
     notifyAction(action) {
@@ -223,7 +222,6 @@ export class AnnotationManager {
         const region = { x, y, width, height, strength, useGradient };
         this.blurRegions.push(region);
 
-        // Brief confirmation outline on the annotation layer
         this.ctx.save();
         this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
         this.ctx.lineWidth = 1;
