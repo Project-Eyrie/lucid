@@ -91,12 +91,15 @@ self.addEventListener('fetch', (event) => {
         // Versioned/pinned third-party assets: cache-first
         event.respondWith(
             caches.match(req).then(hit => hit || fetch(req).then(resp => {
-                if (resp.ok && (resp.type === 'basic' || resp.type === 'cors')) {
+                // Opaque responses (no-cors script/asset loads) are
+                // cacheable too — required for offline replay of CDN
+                // scripts loaded without crossorigin attributes
+                if (resp.ok || resp.type === 'opaque') {
                     const clone = resp.clone();
                     caches.open(RUNTIME_CACHE).then(c => c.put(req, clone));
                 }
                 return resp;
-            }))
+            }).catch(() => caches.match(req)))
         );
     }
 });

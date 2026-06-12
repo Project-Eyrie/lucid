@@ -278,7 +278,17 @@ class ImageForensicsTool {
         });
 
         this.annotationCanvas.addEventListener('mousedown', (e) => {
-            if (e.button === 0 && !this.transform.cropMode && !this.spacePressed) {
+            if (e.button !== 0 || this.spacePressed) return;
+            if (this.splitCompare.active) {
+                this.splitCompare.dragging = true;
+                this.updateSplitFromEvent(e);
+                return;
+            }
+            if (this.ocrRegionSelect) {
+                this.ocrRegionSelect.start = getCanvasCoordinates(this.annotationCanvas, e);
+                return;
+            }
+            if (!this.transform.cropMode) {
                 if (this.colorPickerActive) {
                     this.pickColor(e);
                 } else {
@@ -288,6 +298,14 @@ class ImageForensicsTool {
         });
 
         this.annotationCanvas.addEventListener('mousemove', (e) => {
+            if (this.splitCompare.active && this.splitCompare.dragging) {
+                this.updateSplitFromEvent(e);
+                return;
+            }
+            if (this.ocrRegionSelect?.start) {
+                this.drawOcrRegionPreview(e);
+                return;
+            }
             if (this.annotations.isDrawing && !this.spacePressed) {
                 requestAnimationFrame(() => this.annotations.draw(e));
             }
