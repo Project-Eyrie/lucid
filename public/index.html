@@ -199,12 +199,15 @@
                             <h3>AUTO ENHANCE</h3>
                             <p class="section-hint">Quick presets for common enhancement needs</p>
                             <div class="button-grid">
-                                <button class="preset-btn" data-preset="auto">AUTO</button>
-                                <button class="preset-btn" data-preset="lowlight">LOW LIGHT</button>
-                                <button class="preset-btn" data-preset="forensic">FORENSIC</button>
-                                <button class="preset-btn" data-preset="clarity">CLARITY</button>
-                                <button class="preset-btn" data-preset="vivid">VIVID</button>
-                                <button class="preset-btn" data-preset="muted">MUTED</button>
+                                <button class="preset-btn" data-preset="auto" title="Analyzes the image and computes exposure, contrast, and white balance">SMART AUTO</button>
+                                <button class="preset-btn" data-preset="levels" title="Histogram stretch: exposure and contrast only, no color changes">AUTO LEVELS</button>
+                                <button class="preset-btn" data-preset="color" title="Gray-world color cast correction only">AUTO COLOR</button>
+                                <button class="preset-btn" data-preset="lowlight" title="Shadow lift scaled to how dark the image is">LOW LIGHT</button>
+                                <button class="preset-btn" data-preset="forensic" title="High contrast, desaturated, heavily sharpened">FORENSIC</button>
+                                <button class="preset-btn" data-preset="document" title="Optimized for paper, screens, and text legibility">DOCUMENT</button>
+                                <button class="preset-btn" data-preset="clarity" title="Contrast and sharpening, neutral color">CLARITY</button>
+                                <button class="preset-btn" data-preset="vivid" title="Boosted saturation and contrast">VIVID</button>
+                                <button class="preset-btn" data-preset="muted" title="Reduced saturation and contrast">MUTED</button>
                             </div>
                             <button class="section-reset-btn" id="resetPreset">RESET</button>
                         </div>
@@ -389,19 +392,39 @@
 
                         <div class="panel-section">
                             <h3>SUPER-RESOLUTION (ML)</h3>
-                            <p class="section-hint">Neural upscaling via ONNX Runtime Web — inference runs fully in-browser; your image never leaves your machine. The runtime and model (~240 KB) are downloaded once and cached. Best workflow: crop to the low-res region of interest first, then upscale.</p>
+                            <p class="section-hint">Neural upscaling via ONNX Runtime Web — inference runs fully in-browser; your image never leaves your machine. The runtime and model (~240 KB) are downloaded once and cached. Best workflow for plates and signage: crop to the region, apply perspective correction, then upscale in TEXT &amp; PLATES mode.</p>
+                            <div class="control-row">
+                                <label>MODE</label>
+                                <select id="srMode" class="select-input">
+                                    <option value="general">GENERAL</option>
+                                    <option value="text">TEXT &amp; PLATES</option>
+                                </select>
+                            </div>
+                            <div class="control-row">
+                                <label>PASSES</label>
+                                <select id="srPasses" class="select-input">
+                                    <option value="1">SINGLE</option>
+                                    <option value="2">DOUBLE — FOR TINY CROPS</option>
+                                </select>
+                            </div>
                             <div class="control-row">
                                 <label>MODEL</label>
                                 <select id="srModel" class="select-input">
-                                    <option value="builtin">SUB-PIXEL CNN — 3X (BUILT-IN)</option>
+                                    <option value="builtin">SUB-PIXEL CNN — 3X (BUILT-IN, ~240 KB)</option>
+                                    <option value="realesrgan">REAL-ESRGAN X4PLUS (DOWNLOAD ~65 MB)</option>
                                     <option value="custom">CUSTOM .ONNX (RGB, E.G. ESRGAN)</option>
                                 </select>
+                            </div>
+                            <div class="control-row" id="srUrlRow" style="display:none;">
+                                <label>MODEL URL</label>
+                                <input type="url" id="srModelUrl" class="text-input-small" value="https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/main/Real-ESRGAN-x4plus.onnx" spellcheck="false">
                             </div>
                             <div class="control-row" id="srCustomRow" style="display:none;">
                                 <label>MODEL FILE</label>
                                 <input type="file" id="srModelFile" accept=".onnx" class="file-input-small">
                             </div>
                             <button id="runSuperRes" class="panel-btn primary">UPSCALE IMAGE</button>
+                            <button id="saveSrModel" class="panel-btn hidden" title="Save the downloaded model so it can be reused offline via CUSTOM .ONNX">SAVE MODEL TO DISK</button>
                             <div id="srProgress" class="ocr-progress" style="display:none;">
                                 <div class="ocr-progress-bar"><div id="srProgressFill" class="ocr-progress-fill"></div></div>
                                 <span id="srProgressText" class="ocr-progress-text">Loading model...</span>
@@ -813,11 +836,11 @@
                 </div>
                 <div class="help-section">
                     <h3>ENHANCE TAB</h3>
-                    <p>Use presets for quick adjustments or manually adjust brightness, contrast, saturation, and other parameters. The Advanced section contains a proper unsharp mask (amount, radius, threshold), gamma, and color balance. Filters include CLAHE (adaptive contrast for shadows), auto white balance, and dehaze. Use the Curves editor for precise tonal adjustments. A dot on the tab indicates non-default settings.</p>
+                    <p>The SMART AUTO, AUTO LEVELS, AUTO COLOR, and LOW LIGHT presets are adaptive: they analyze the image histogram and channel means and compute exposure, contrast, and white-balance values from what they find — the computed values appear in the sliders, so every automatic decision is visible and adjustable. Static presets (FORENSIC, DOCUMENT, CLARITY, VIVID, MUTED) cover common looks. The Advanced section contains a proper unsharp mask (amount, radius, threshold), gamma, and color balance. Filters include CLAHE, auto white balance, and dehaze. A dot on the tab indicates non-default settings.</p>
                 </div>
                 <div class="help-section">
                     <h3>TRANSFORM TAB</h3>
-                    <p>Zoom, rotate, flip, and crop your image. Use Crop Mode to select a region, then Apply Crop (reset rotation/flip first — crop works on the unrotated image). Perspective correction lets you click 4 corners of a document, screen, or plate photographed at an angle and warp it flat. ML Super-Resolution neurally upscales the image (3x built-in model, or load your own ESRGAN-style .onnx) entirely in-browser — crop to the region of interest first for best speed and quality.</p>
+                    <p>Zoom, rotate, flip, and crop your image. Use Crop Mode to select a region, then Apply Crop (reset rotation/flip first — crop works on the unrotated image). Perspective correction lets you click 4 corners of a document, screen, or plate photographed at an angle and warp it flat. ML Super-Resolution neurally upscales the image entirely in-browser (3x built-in model, or load your own ESRGAN-style .onnx). TEXT &amp; PLATES mode adds a forensic pipeline around the model: denoise, iterative back-projection (the result is forced to stay consistent with the true source pixels, suppressing hallucinated strokes), and stroke-tuned sharpening. For plates: crop, perspective-correct, then upscale in TEXT &amp; PLATES mode — use DOUBLE passes for very small crops. For maximum quality, the REAL-ESRGAN X4PLUS option downloads a state-of-the-art model (~65 MB, one time) directly through Lucid; SAVE MODEL TO DISK keeps a copy for fully offline reuse via CUSTOM .ONNX. The model URL is editable in case the default host moves.</p>
                 </div>
                 <div class="help-section">
                     <h3>ANNOTATE TAB</h3>

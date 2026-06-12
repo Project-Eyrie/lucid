@@ -2228,3 +2228,22 @@ input[type="color"]:hover {
     color: var(--accent);
     border-color: var(--accent-dim);
 }
+
+/* --- Super-resolution: compact URL input --- */
+.text-input-small {
+    flex: 1;
+    min-width: 0;
+    background: #111;
+    border: 1px solid #1e1e1e;
+    border-radius: 6px;
+    color: #999;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    padding: 6px 8px;
+}
+
+.text-input-small:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+    color: #ccc;
+}

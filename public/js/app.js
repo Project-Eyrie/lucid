@@ -17,7 +17,7 @@ import { HistogramDisplay } from './histogram.js';
 import { HistoryManager } from './history.js';
 import { computeELA, parseJPEGInternals, estimateJPEGQuality, extractEmbeddedThumbnail } from './forensics.js';
 import { perspectiveWarp } from './perspective.js';
-import { SuperResolver } from './superres.js';
+import { SuperResolver, DOWNLOADABLE_MODELS, preprocessForText, backProject, postprocessForText } from './superres.js';
 import * as Filters from './filters.js';
 import { debounce, throttle, rgbToHex, escapeHtml, showToast, loadPrefs, savePrefs } from './utils.js';
 
@@ -602,12 +602,32 @@ class ImageForensicsTool {
 
         // ML super-resolution
         document.getElementById('srModel')?.addEventListener('change', (e) => {
-            document.getElementById('srCustomRow').style.display =
-                e.target.value === 'custom' ? 'flex' : 'none';
+            const choice = e.target.value;
+            document.getElementById('srCustomRow').style.display = choice === 'custom' ? 'flex' : 'none';
+            const urlRow = document.getElementById('srUrlRow');
+            if (urlRow) {
+                urlRow.style.display = DOWNLOADABLE_MODELS[choice] ? 'flex' : 'none';
+                if (DOWNLOADABLE_MODELS[choice]) {
+                    const urlInput = document.getElementById('srModelUrl');
+                    if (urlInput && !urlInput.dataset.userEdited) {
+                        urlInput.value = DOWNLOADABLE_MODELS[choice].url;
+                    }
+                }
+            }
+            document.getElementById('saveSrModel')?.classList.add('hidden');
             this.superResolver = null; // force re-init on model switch
+        });
+        document.getElementById('srModelUrl')?.addEventListener('input', (e) => {
+            e.target.dataset.userEdited = '1';
+            this.superResolver = null;
         });
         document.getElementById('srModelFile')?.addEventListener('change', () => {
             this.superResolver = null;
+        });
+        document.getElementById('saveSrModel')?.addEventListener('click', () => {
+            if (this.superResolver?.saveModelToDisk()) {
+                showToast('Model saved — load it via CUSTOM .ONNX for fully offline use.', 'success', 4000);
+            }
         });
         document.getElementById('runSuperRes')?.addEventListener('click', () => this.runSuperResolution());
 
@@ -1210,8 +1230,11 @@ class ImageForensicsTool {
 
     async runSuperResolution() {
         // Upscales the working image with an in-browser neural network.
-        // The result replaces the working image as an undoable command,
-        // exactly like crop and perspective correction.
+        // TEXT/PLATE mode wraps the model in a forensic pipeline:
+        // denoise -> SR -> iterative back-projection (consistency with
+        // the true source pixels, suppressing hallucinated strokes) ->
+        // stroke-tuned sharpening. The result replaces the working
+        // image as an undoable command, exactly like crop.
         if (this.srBusy) return;
         if (!this.originalImage) {
             showToast('Please load an image first.', 'warning');
@@ -1221,18 +1244,22 @@ class ImageForensicsTool {
         const W = this.originalImage.width;
         const H = this.originalImage.height;
         const megapixels = (W * H) / 1e6;
+        const mode = document.getElementById('srMode')?.value || 'general';
+        const passes = parseInt(document.getElementById('srPasses')?.value || '1');
+        const modelChoice = document.getElementById('srModel')?.value || 'builtin';
 
         // Neural upscaling cost grows with area; protect the tab.
         if (W * H > 2048 * 2048) {
             showToast('Image is too large for in-browser super-resolution (max ~4 MP). Crop to the region of interest first.', 'warning', 6000);
             return;
         }
-        if (megapixels > 1) {
+        if (modelChoice === 'realesrgan' && W * H > 512 * 512) {
+            showToast('Real-ESRGAN is a heavy model on CPU — above ~0.25 MP expect several minutes. Cropping to the region of interest first is strongly recommended.', 'warning', 7000);
+        } else if (megapixels > 1) {
             showToast(`Large image (${megapixels.toFixed(1)} MP) — this may take a while. For faster results, crop to the region of interest first.`, 'info', 5000);
         }
 
         const btn = document.getElementById('runSuperRes');
-        const modelChoice = document.getElementById('srModel')?.value || 'builtin';
         this.srBusy = true;
         if (btn) { btn.disabled = true; btn.textContent = 'WORKING...'; }
 
@@ -1252,26 +1279,69 @@ class ImageForensicsTool {
                     await resolver.loadCustom(await file.arrayBuffer(), file.name);
                     this.setSrProgress('Probing model scale...', 0);
                     await resolver.probeScale();
+                } else if (DOWNLOADABLE_MODELS[modelChoice]) {
+                    const def = DOWNLOADABLE_MODELS[modelChoice];
+                    const url = document.getElementById('srModelUrl')?.value?.trim() || def.url;
+                    await resolver.loadFromUrl(url, def.label, def.filename,
+                        (status, fraction) => this.setSrProgress(status, fraction ?? 0));
+                    this.setSrProgress('Probing model scale...', 0);
+                    await resolver.probeScale();
+                    document.getElementById('saveSrModel')?.classList.remove('hidden');
                 } else {
                     await resolver.loadBuiltin((status) => this.setSrProgress(status, 0));
                 }
                 this.superResolver = resolver;
             }
+            const scale = this.superResolver.scale;
 
             // Run on the unmodified working image, like ELA: enhancement
             // settings stay non-destructive and re-apply to the result
-            const srcCanvas = document.createElement('canvas');
-            srcCanvas.width = W;
-            srcCanvas.height = H;
-            srcCanvas.getContext('2d').drawImage(this.originalImage, 0, 0);
+            let current = document.createElement('canvas');
+            current.width = W;
+            current.height = H;
+            current.getContext('2d').drawImage(this.originalImage, 0, 0);
 
-            const result = await this.superResolver.upscale(srcCanvas, (done, total) => {
-                this.setSrProgress(`Processing tile ${done}/${total}...`, done / total);
-            });
+            if (mode === 'text') {
+                this.setSrProgress('Denoising (text mode)...', 0);
+                preprocessForText(current);
+                await new Promise(r => setTimeout(r, 0));
+            }
+
+            for (let pass = 1; pass <= passes; pass++) {
+                // Re-check area before each pass: 2-pass at 3x is 9x total
+                if (current.width * current.height * scale * scale > 2048 * 2048 * 1.2) {
+                    showToast(`Stopped after pass ${pass - 1}: the next pass would exceed the in-browser size limit.`, 'warning', 5000);
+                    break;
+                }
+
+                const passLabel = passes > 1 ? ` (pass ${pass}/${passes})` : '';
+                const result = await this.superResolver.upscale(current, (done, total) => {
+                    this.setSrProgress(`Processing tile ${done}/${total}${passLabel}...`, done / total);
+                });
+
+                // Back-projection: enforce that downscaling the result
+                // reproduces the actual observed pixels. In TEXT mode
+                // this is the key anti-hallucination step; in GENERAL
+                // mode one light iteration still tightens edges.
+                const ibpIterations = mode === 'text' ? 3 : 1;
+                await backProject(current, result, ibpIterations, 0.75, (it, total) => {
+                    this.setSrProgress(`Back-projection ${it}/${total}${passLabel}...`, it / total);
+                });
+
+                current = result;
+            }
+
+            if (mode === 'text') {
+                this.setSrProgress('Stroke enhancement...', 1);
+                postprocessForText(current);
+                await new Promise(r => setTimeout(r, 0));
+            }
 
             this.setSrProgress('Finalizing...', 1);
-            this.swapWorkingImage(result.toDataURL(), `Super-resolution (${this.superResolver.scale}x, ${this.superResolver.label})`);
-            showToast(`Upscaled ${W}\u00D7${H} \u2192 ${result.width}\u00D7${result.height} with ${this.superResolver.label}. Ctrl+Z to revert.`, 'success', 5000);
+            const totalScale = Math.round(current.width / W);
+            const modeLabel = mode === 'text' ? ', text/plate mode' : '';
+            this.swapWorkingImage(current.toDataURL(), `Super-resolution (${totalScale}x, ${this.superResolver.label}${modeLabel})`);
+            showToast(`Upscaled ${W}\u00D7${H} \u2192 ${current.width}\u00D7${current.height} with ${this.superResolver.label}${modeLabel}. Ctrl+Z to revert.`, 'success', 5000);
         } catch (err) {
             console.error('Super-resolution failed:', err);
             showToast('Super-resolution failed: ' + (err.message || 'unknown error'), 'error', 6000);
@@ -1926,29 +1996,144 @@ class ImageForensicsTool {
         return html;
     }
 
+    computeImageStats() {
+        // Analyzes the working image (downsampled for speed) and returns
+        // luminance percentiles and channel means for adaptive presets
+        const maxDim = 320;
+        const scale = Math.min(1, maxDim / Math.max(this.originalImage.width, this.originalImage.height));
+        const w = Math.max(1, Math.round(this.originalImage.width * scale));
+        const h = Math.max(1, Math.round(this.originalImage.height * scale));
+
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(this.originalImage, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+
+        const hist = new Uint32Array(256);
+        let rSum = 0, gSum = 0, bSum = 0;
+        const n = w * h;
+        for (let i = 0; i < data.length; i += 4) {
+            rSum += data[i];
+            gSum += data[i + 1];
+            bSum += data[i + 2];
+            hist[Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2])]++;
+        }
+
+        const percentile = (p) => {
+            const target = n * p;
+            let acc = 0;
+            for (let v = 0; v < 256; v++) {
+                acc += hist[v];
+                if (acc >= target) return v;
+            }
+            return 255;
+        };
+
+        return {
+            p1: percentile(0.01),
+            median: percentile(0.5),
+            p99: percentile(0.99),
+            rMean: rSum / n,
+            gMean: gSum / n,
+            bMean: bSum / n
+        };
+    }
+
     applyPreset(preset) {
-        // Applies auto-enhancement presets (single pipeline pass, undoable)
+        // Applies an enhancement preset (single pipeline pass, undoable).
+        // 'Auto' presets are adaptive: they analyze the image histogram
+        // and channel means and compute slider values from what they
+        // find, so the resulting settings are visible and auditable in
+        // the sliders rather than being a black box.
         if (!this.originalImage) return;
 
+        const clampVal = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+        // Adaptive building blocks ------------------------------------
+        const autoGamma = (stats, targetLuma, lo, hi) => {
+            // Gamma that maps the median luminance onto targetLuma
+            const m = clampVal(stats.median, 4, 250) / 255;
+            return clampVal(Math.log(m) / Math.log(targetLuma / 255), lo, hi);
+        };
+        const autoContrast = (stats, targetSpread, strength, max) => {
+            // Contrast proportional to how compressed the histogram is
+            const spread = Math.max(8, stats.p99 - stats.p1);
+            return clampVal((targetSpread - spread) * strength, 0, max);
+        };
+        const autoBrightness = (stats, strength, max) => {
+            // Recenters the histogram midpoint toward 128
+            const mid = (stats.p1 + stats.p99) / 2;
+            return clampVal(((128 - mid) / 2.55) * strength, -max, max);
+        };
+        const autoBalance = (stats, strength, max) => {
+            // Gray-world channel shifts mapped onto the balance sliders
+            const avg = (stats.rMean + stats.gMean + stats.bMean) / 3;
+            return {
+                balanceR: clampVal((avg - stats.rMean) * strength, -max, max),
+                balanceG: clampVal((avg - stats.gMean) * strength, -max, max),
+                balanceB: clampVal((avg - stats.bMean) * strength, -max, max)
+            };
+        };
+
+        // Preset definitions: static objects or stats-driven functions -
         const presets = {
-            auto: { brightness: 10, contrast: 15, saturation: 10, sharpen: 15, gamma: 1.1 },
-            lowlight: { brightness: 30, contrast: 25, gamma: 1.3, saturation: 5, sharpen: 10 },
+            auto: (s) => ({
+                // Smart auto: exposure + contrast + white balance, all
+                // measured from this image rather than fixed numbers
+                gamma: autoGamma(s, 118, 0.65, 1.9),
+                contrast: autoContrast(s, 220, 0.35, 35),
+                brightness: autoBrightness(s, 0.3, 15),
+                saturation: 8,
+                sharpen: 12,
+                ...autoBalance(s, 0.7, 35)
+            }),
+            levels: (s) => ({
+                // Pure tonal stretch (no color changes)
+                gamma: autoGamma(s, 122, 0.7, 1.8),
+                contrast: autoContrast(s, 250, 0.5, 45),
+                brightness: autoBrightness(s, 0.5, 25),
+                saturation: 0,
+                sharpen: 0
+            }),
+            color: (s) => ({
+                // Cast correction only
+                brightness: 0, contrast: 0, gamma: 1.0, sharpen: 0,
+                saturation: 5,
+                ...autoBalance(s, 0.9, 45)
+            }),
+            lowlight: (s) => ({
+                // Shadow lift scaled to how dark the image actually is
+                gamma: autoGamma(s, 140, 1.0, 2.2),
+                brightness: clampVal((90 - s.median) / 2.55 * 0.4, 0, 30),
+                contrast: 15,
+                saturation: 5,
+                sharpen: 10
+            }),
             forensic: { contrast: 40, sharpen: 50, saturation: -30, gamma: 0.9, brightness: 5 },
+            document: { contrast: 35, saturation: -60, sharpen: 45, sharpenRadius: 1, gamma: 1.05, brightness: 0 },
             clarity: { contrast: 20, sharpen: 40, saturation: 0, gamma: 1.0, brightness: 0 },
             vivid: { saturation: 40, contrast: 25, brightness: 5, sharpen: 15, gamma: 1.05 },
             muted: { saturation: -40, contrast: -10, brightness: -5, sharpen: 0, gamma: 1.0 }
         };
 
-        const settings = presets[preset];
-        if (!settings) return;
+        const def = presets[preset];
+        if (!def) return;
 
+        const settings = typeof def === 'function' ? def(this.computeImageStats()) : def;
         const prev = { ...this.enhancements };
+
         const apply = () => {
-            this.enhancements.brightness = settings.brightness ?? 0;
-            this.enhancements.contrast = settings.contrast ?? 0;
-            this.enhancements.saturation = settings.saturation ?? 0;
-            this.enhancements.sharpen = settings.sharpen ?? 0;
-            this.enhancements.gamma = settings.gamma ?? 1.0;
+            this.enhancements.brightness = Math.round(settings.brightness ?? 0);
+            this.enhancements.contrast = Math.round(settings.contrast ?? 0);
+            this.enhancements.saturation = Math.round(settings.saturation ?? 0);
+            this.enhancements.sharpen = Math.round(settings.sharpen ?? 0);
+            this.enhancements.sharpenRadius = settings.sharpenRadius ?? 2;
+            this.enhancements.gamma = Math.round((settings.gamma ?? 1.0) * 100) / 100;
+            this.enhancements.balanceR = Math.round(settings.balanceR ?? 0);
+            this.enhancements.balanceG = Math.round(settings.balanceG ?? 0);
+            this.enhancements.balanceB = Math.round(settings.balanceB ?? 0);
             this.syncEnhancementSliders();
             document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelector(`[data-preset="${preset}"]`)?.classList.add('active');
