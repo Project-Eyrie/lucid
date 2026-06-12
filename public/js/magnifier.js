@@ -174,13 +174,17 @@ export class Magnifier {
         pixelInfo.style.left = (mouseX + 10) + 'px';
         pixelInfo.style.top = (mouseY - 40) + 'px';
 
-        const idx = (Math.floor(canvasY) * width + Math.floor(canvasX)) * 4;
+        // Clamp to valid pixel coordinates: at the right/bottom edges the
+        // raw cursor position can index one past the buffer (RGB: undefined)
+        const px = Math.max(0, Math.min(width - 1, Math.floor(canvasX)));
+        const py = Math.max(0, Math.min(Math.floor(imageData.data.length / 4 / width) - 1, Math.floor(canvasY)));
+        const idx = (py * width + px) * 4;
         const r = imageData.data[idx];
         const g = imageData.data[idx + 1];
         const b = imageData.data[idx + 2];
         const hex = rgbToHex(r, g, b);
 
-        pixelInfo.innerHTML = `RGB: ${r},${g},${b}<br>HEX: ${hex}<br>POS: ${Math.floor(canvasX)},${Math.floor(canvasY)}`;
+        pixelInfo.innerHTML = `RGB: ${r},${g},${b}<br>HEX: ${hex}<br>POS: ${px},${py}`;
     }
 
     hide() {

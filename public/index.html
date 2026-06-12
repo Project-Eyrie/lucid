@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/exifr/dist/lite.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
@@ -129,6 +129,36 @@
                 </div>
             </div>
             <div class="header-right">
+                <button id="undoBtn" class="header-btn" type="button" title="Undo (Ctrl+Z)" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="9 14 4 9 9 4"/>
+                        <path d="M20 20v-7a4 4 0 0 0-4-4H4"/>
+                    </svg>
+                </button>
+                <button id="redoBtn" class="header-btn" type="button" title="Redo (Ctrl+Shift+Z)" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="15 14 20 9 15 4"/>
+                        <path d="M4 20v-7a4 4 0 0 1 4-4h12"/>
+                    </svg>
+                </button>
+                <button id="compareBtn" class="header-btn" type="button" title="Hold to compare with original (hold \)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="5" width="18" height="14" rx="2"/>
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                    </svg>
+                </button>
+                <button id="zoomFit" class="header-btn" type="button" title="Fit image to view">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="15 3 21 3 21 9"/>
+                        <polyline points="9 21 3 21 3 15"/>
+                        <line x1="21" y1="3" x2="14" y2="10"/>
+                        <line x1="3" y1="21" x2="10" y2="14"/>
+                    </svg>
+                </button>
+                <button id="zoomActual" class="header-btn" type="button" title="Actual size (100%)">
+                    <span>1:1</span>
+                </button>
+                <div class="header-divider"></div>
                 <button id="copyBtn" class="header-btn" type="button" title="Copy to clipboard">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -221,6 +251,16 @@
                                             <span class="value">0</span>
                                         </div>
                                         <div class="control-row">
+                                            <label>SHARPEN RADIUS</label>
+                                            <input type="range" id="sharpenRadius" min="1" max="10" value="2">
+                                            <span class="value">2px</span>
+                                        </div>
+                                        <div class="control-row">
+                                            <label>SHARPEN THRESHOLD</label>
+                                            <input type="range" id="sharpenThreshold" min="0" max="50" value="0">
+                                            <span class="value">0</span>
+                                        </div>
+                                        <div class="control-row">
                                             <label>GAMMA</label>
                                             <input type="range" id="gamma" min="20" max="500" value="100" step="1">
                                             <span class="value">1.00</span>
@@ -280,7 +320,10 @@
                                         <button class="filter-btn" data-filter="edge">EDGES</button>
                                         <button class="filter-btn" data-filter="emboss">EMBOSS</button>
                                         <button class="filter-btn" data-filter="histogram">EQUALIZE</button>
+                                        <button class="filter-btn" data-filter="clahe">CLAHE</button>
                                         <button class="filter-btn" data-filter="noise">DENOISE</button>
+                                        <button class="filter-btn" data-filter="whitebalance">AUTO WB</button>
+                                        <button class="filter-btn" data-filter="dehaze">DEHAZE</button>
                                     </div>
                                     <button class="section-reset-btn" id="resetFilters">RESET</button>
                                 </div>
@@ -332,6 +375,37 @@
                                 <p class="instruction-step"><span class="step-num">3</span> Click APPLY CROP to finalize</p>
                             </div>
                             <button class="filter-btn" id="cropBtn" style="width: 100%; margin-top: 8px;">CROP MODE</button>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>PERSPECTIVE</h3>
+                            <div class="crop-instructions">
+                                <p class="instruction-step"><span class="step-num">1</span> Click START, then click the 4 corners of the surface to straighten (any order)</p>
+                                <p class="instruction-step"><span class="step-num">2</span> The image warps automatically after the 4th point</p>
+                                <p class="instruction-step"><span class="step-num">3</span> Press ESC to cancel. Undo with Ctrl+Z</p>
+                            </div>
+                            <button class="filter-btn" id="perspectiveBtn" style="width: 100%; margin-top: 8px;">START PERSPECTIVE CORRECTION</button>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>SUPER-RESOLUTION (ML)</h3>
+                            <p class="section-hint">Neural upscaling via ONNX Runtime Web — inference runs fully in-browser; your image never leaves your machine. The runtime and model (~240 KB) are downloaded once and cached. Best workflow: crop to the low-res region of interest first, then upscale.</p>
+                            <div class="control-row">
+                                <label>MODEL</label>
+                                <select id="srModel" class="select-input">
+                                    <option value="builtin">SUB-PIXEL CNN — 3X (BUILT-IN)</option>
+                                    <option value="custom">CUSTOM .ONNX (RGB, E.G. ESRGAN)</option>
+                                </select>
+                            </div>
+                            <div class="control-row" id="srCustomRow" style="display:none;">
+                                <label>MODEL FILE</label>
+                                <input type="file" id="srModelFile" accept=".onnx" class="file-input-small">
+                            </div>
+                            <button id="runSuperRes" class="panel-btn primary">UPSCALE IMAGE</button>
+                            <div id="srProgress" class="ocr-progress" style="display:none;">
+                                <div class="ocr-progress-bar"><div id="srProgressFill" class="ocr-progress-fill"></div></div>
+                                <span id="srProgressText" class="ocr-progress-text">Loading model...</span>
+                            </div>
                         </div>
                     </div>
 
@@ -650,6 +724,23 @@
                                 </div>
                             </div>
                         </div>
+
+                        <div class="panel-section">
+                            <h3>FORENSICS — ERROR LEVEL ANALYSIS</h3>
+                            <p class="section-hint">Re-compresses the original image as JPEG and amplifies the per-pixel difference. Areas with a different error level than their surroundings may have been edited. View only — does not modify the image.</p>
+                            <div class="control-row">
+                                <label>JPEG QUALITY</label>
+                                <input type="range" id="elaQuality" min="50" max="95" value="75">
+                                <span class="value">75%</span>
+                            </div>
+                            <div class="control-row">
+                                <label>AMPLIFY</label>
+                                <input type="range" id="elaAmplify" min="5" max="40" value="15">
+                                <span class="value">15x</span>
+                            </div>
+                            <button id="runEla" class="panel-btn primary">RUN ELA</button>
+                            <button id="exitEla" class="panel-btn hidden">EXIT ELA VIEW</button>
+                        </div>
                     </div>
 
                     <div id="exif" class="tab-panel">
@@ -657,6 +748,14 @@
                             <h3>METADATA</h3>
                             <div id="exifContent" class="exif-content">
                                 <p class="no-data">No image loaded</p>
+                            </div>
+                        </div>
+
+                        <div class="panel-section">
+                            <h3>SESSION HISTORY</h3>
+                            <p class="section-hint">Audit trail of every operation applied to the image this session. Ctrl+Z / Ctrl+Shift+Z to step back and forward.</p>
+                            <div id="historyList" class="history-list">
+                                <p class="no-data">No operations yet</p>
                             </div>
                         </div>
                     </div>
@@ -682,6 +781,7 @@
                         </span>
                     </div>
                     <div class="status-right">
+                        <span id="zoomStatus">ZOOM: 100%</span>
                     </div>
                 </div>
             </div>
@@ -701,27 +801,35 @@
                         <span><kbd>A</kbd></span><span>Toggle Annotations</span>
                         <span><kbd>M</kbd></span><span>Toggle Magnifier</span>
                         <span><kbd>P</kbd></span><span>Color Picker</span>
+                        <span><kbd>R</kbd> <kbd>C</kbd> <kbd>B</kbd> <kbd>T</kbd> <kbd>L</kbd> <kbd>U</kbd></span><span>Select tool: Rect / Circle / Blur / Text / Line / Measure</span>
+                        <span><kbd>ESC</kbd></span><span>Deselect tool / cancel perspective</span>
                         <span><kbd>SPACE</kbd></span><span>Pan (hold and drag)</span>
+                        <span><kbd>\</kbd></span><span>Hold to compare with original</span>
                         <span><kbd>Ctrl+Z</kbd></span><span>Undo</span>
+                        <span><kbd>Ctrl+Shift+Z</kbd></span><span>Redo</span>
                         <span><kbd>Ctrl+V</kbd></span><span>Paste Image</span>
-                        <span><kbd>Scroll</kbd></span><span>Zoom In/Out</span>
+                        <span><kbd>Scroll</kbd></span><span>Zoom toward cursor</span>
                     </div>
                 </div>
                 <div class="help-section">
                     <h3>ENHANCE TAB</h3>
-                    <p>Use presets for quick adjustments or manually adjust brightness, contrast, saturation, and other parameters. The Advanced section contains sharpen, gamma, and color balance controls. Use the Curves editor for precise tonal adjustments.</p>
+                    <p>Use presets for quick adjustments or manually adjust brightness, contrast, saturation, and other parameters. The Advanced section contains a proper unsharp mask (amount, radius, threshold), gamma, and color balance. Filters include CLAHE (adaptive contrast for shadows), auto white balance, and dehaze. Use the Curves editor for precise tonal adjustments. A dot on the tab indicates non-default settings.</p>
                 </div>
                 <div class="help-section">
                     <h3>TRANSFORM TAB</h3>
-                    <p>Zoom, rotate, flip, and crop your image. Use the Crop Mode button to select a region, then click Apply Crop to cut. Filters like Edge Detection, Emboss, and Histogram Equalization are also here.</p>
+                    <p>Zoom, rotate, flip, and crop your image. Use Crop Mode to select a region, then Apply Crop (reset rotation/flip first — crop works on the unrotated image). Perspective correction lets you click 4 corners of a document, screen, or plate photographed at an angle and warp it flat. ML Super-Resolution neurally upscales the image (3x built-in model, or load your own ESRGAN-style .onnx) entirely in-browser — crop to the region of interest first for best speed and quality.</p>
                 </div>
                 <div class="help-section">
                     <h3>ANNOTATE TAB</h3>
-                    <p>Draw shapes (rectangles, circles, arrows, lines), add text labels, or blur sensitive areas. Watermark and Caption tools add overlays to your image. Use Undo to remove the last annotation.</p>
+                    <p>Draw shapes (rectangles, circles, arrows, lines), add text labels, measure distances, or blur sensitive areas. Watermark and Caption tools add overlays. All actions are undoable with Ctrl+Z in the order they were made.</p>
                 </div>
                 <div class="help-section">
-                    <h3>INFO TAB</h3>
-                    <p>View file metadata including EXIF data, camera info, GPS location (if available), and file hash for verification.</p>
+                    <h3>OSINT TAB</h3>
+                    <p>Reverse image search, in-browser OCR, and Error Level Analysis (ELA) — a quick manipulation screen that highlights regions whose JPEG error level differs from their surroundings.</p>
+                </div>
+                <div class="help-section">
+                    <h3>METADATA TAB</h3>
+                    <p>EXIF data with copy buttons, GPS map, raw tag dump, JPEG quantization tables with estimated encoder quality, embedded thumbnail comparison (mismatches betray editing), SHA-256 hash, and a session history audit trail of every operation applied.</p>
                 </div>
             </div>
         </div>

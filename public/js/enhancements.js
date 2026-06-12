@@ -9,7 +9,7 @@
  */
 
 import { clamp } from './utils.js';
-import { applySharpen } from './filters.js';
+import { applyUnsharpMask } from './filters.js';
 
 function applyBrightness(data, brightness) {
     // Shifts all pixel values lighter or darker
@@ -106,6 +106,11 @@ export function processEnhancements(imageData, enhancements, width, height, curv
     }
 
     if (enhancements.sharpen > 0) {
-        applySharpen(data, width, height, enhancements.sharpen / 100);
+        applyUnsharpMask(
+            data, width, height,
+            enhancements.sharpen / 100 * 2,
+            enhancements.sharpenRadius ?? 2,
+            enhancements.sharpenThreshold ?? 0
+        );
     }
 }

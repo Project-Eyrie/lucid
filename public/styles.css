@@ -1918,3 +1918,313 @@ input[type="color"]:hover {
     letter-spacing: 0.5px;
     border-top: 1px solid #1a1a1a;
 }
+
+/* ============================================================
+   ADDITIONS — toasts, history, forensics, metadata polish
+   ============================================================ */
+
+/* Utility */
+.hidden {
+    display: none !important;
+}
+
+/* --- Toast notifications --- */
+.toast-container {
+    position: fixed;
+    bottom: 48px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+}
+
+.toast {
+    background: #161616;
+    border: 1px solid #2a2a2a;
+    border-left: 3px solid #555;
+    color: #ccc;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.3px;
+    padding: 10px 16px;
+    border-radius: 6px;
+    max-width: 480px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+}
+
+.toast.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.toast-success { border-left-color: var(--accent); }
+.toast-error   { border-left-color: #e04444; }
+.toast-warning { border-left-color: #e0a030; }
+.toast-info    { border-left-color: #4488e0; }
+
+/* --- Drag & drop --- */
+.canvas-wrapper.drag-over {
+    outline: 2px dashed var(--accent);
+    outline-offset: -8px;
+    background: var(--accent-bg);
+}
+
+/* --- Tab modified indicator --- */
+.tab-btn {
+    position: relative;
+}
+
+.tab-btn.modified::after {
+    content: '';
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+
+/* --- Filter stack count badge --- */
+.filter-btn[data-count]::after {
+    content: attr(data-count);
+    margin-left: 5px;
+    font-size: 8px;
+    background: var(--accent);
+    color: #000;
+    padding: 1px 4px;
+    border-radius: 6px;
+    vertical-align: top;
+}
+
+/* --- Session history (audit trail) --- */
+.history-list {
+    max-height: 260px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.history-entry {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 8px;
+    background: #111;
+    border: 1px solid #1a1a1a;
+    border-radius: 4px;
+    font-size: 10px;
+    color: #aaa;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.history-entry.undone {
+    opacity: 0.4;
+    text-decoration: line-through;
+}
+
+.history-num {
+    color: var(--accent-dim);
+    min-width: 18px;
+    text-align: right;
+}
+
+/* --- Metadata: copy buttons --- */
+.copy-meta-btn {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    color: #888;
+    font-size: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+    padding: 2px 7px;
+    margin-left: 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    vertical-align: middle;
+}
+
+.copy-meta-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+}
+
+/* --- Metadata: GPS map embed --- */
+.gps-map-embed {
+    width: 100%;
+    height: 220px;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    margin: 8px 0;
+    background: #111;
+}
+
+.gps-links {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.gps-links a {
+    color: var(--accent);
+    font-size: 10px;
+    text-decoration: none;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.gps-links a:hover {
+    text-decoration: underline;
+}
+
+/* --- Metadata: raw EXIF dump --- */
+.raw-exif {
+    margin-top: 10px;
+    border: 1px solid #1e1e1e;
+    border-radius: 6px;
+    background: #0d0d0d;
+}
+
+.raw-exif summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-size: 10px;
+    color: #888;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    user-select: none;
+}
+
+.raw-exif summary:hover {
+    color: var(--accent);
+}
+
+.raw-exif .exif-table {
+    margin: 0;
+    padding: 6px 10px 10px;
+    border-top: 1px solid #1e1e1e;
+    display: block;
+    max-height: 320px;
+    overflow: auto;
+}
+
+.raw-exif .exif-table .exif-value {
+    word-break: break-all;
+}
+
+.raw-exif pre {
+    margin: 0;
+    padding: 10px;
+    border-top: 1px solid #1e1e1e;
+    font-size: 9px;
+    line-height: 1.5;
+    color: #999;
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* --- JPEG internals: quantization tables --- */
+.quant-table-wrap {
+    margin: 8px 0;
+}
+
+.quant-label {
+    display: block;
+    font-size: 9px;
+    color: #888;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+}
+
+.quant-table {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 1px;
+    background: #1a1a1a;
+    border: 1px solid #1a1a1a;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.quant-table span {
+    background: #0f0f0f;
+    color: #999;
+    font-size: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    text-align: center;
+    padding: 3px 0;
+}
+
+/* --- Embedded thumbnail comparison --- */
+.thumb-compare {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 8px 0;
+}
+
+.embedded-thumb {
+    max-width: 160px;
+    max-height: 160px;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    image-rendering: pixelated;
+}
+
+.thumb-compare .thumb-note {
+    font-size: 9px;
+    color: #777;
+    line-height: 1.5;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* --- No-data inside history list --- */
+.history-list .no-data {
+    padding: 8px;
+}
+
+/* --- Super-resolution: compact file input --- */
+.file-input-small {
+    flex: 1;
+    min-width: 0;
+    background: #111;
+    border: 1px solid #1e1e1e;
+    border-radius: 6px;
+    color: #888;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    padding: 5px;
+    cursor: pointer;
+}
+
+.file-input-small::file-selector-button {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    color: #999;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    margin-right: 8px;
+    cursor: pointer;
+}
+
+.file-input-small::file-selector-button:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+}

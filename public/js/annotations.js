@@ -2,9 +2,14 @@
  * Annotation Tools
  *
  * Manages drawing annotations over images including rectangles,
- * circles, arrows, lines, text labels, and blur regions. Supports
- * filled and outline modes, undo functionality, and maintains
- * separate history for annotations and blur operations.
+ * circles, arrows, lines, text labels, measurements, and blur regions.
+ *
+ * Blur regions are stored as parameters only (rect + strength), never
+ * as pixel snapshots: the application re-renders blurs from the live
+ * pipeline whenever enhancements change, so undo and toggling can
+ * never restore stale pixels. Every completed action is reported via
+ * the onAction callback so the application can record it on the
+ * unified undo/redo stack.
  */
 
 import { getCanvasCoordinates } from './utils.js';
@@ -18,7 +23,6 @@ export class AnnotationManager {
         this.mainCanvas = mainCanvas;
         this.mainCtx = mainCtx;
         this.annotations = [];
-        this.blurHistory = [];
         this.blurRegions = [];
         this.currentTool = 'select';
         this.isDrawing = false;
@@ -26,6 +30,12 @@ export class AnnotationManager {
         this.startY = 0;
         this.visible = true;
         this.tabActive = true;
+        this.onAction = null; // callback({ type, data }) for the history stack
+    }
+
+    notifyAction(action) {
+        // Reports a completed action for history recording
+        if (this.onAction) this.onAction(action);
     }
 
     getScaleFactor() {
@@ -64,14 +74,7 @@ export class AnnotationManager {
         if (this.currentTool === 'text') {
             const settings = this.getSettings();
             if (settings.text) {
-                const font = `${settings.textWeight} ${settings.textSize}px ${settings.textFont}`;
-                this.ctx.save();
-                this.ctx.font = font;
-                this.ctx.fillStyle = settings.textColor;
-                this.ctx.fillText(settings.text, this.startX, this.startY);
-                this.ctx.restore();
-
-                this.annotations.push({
+                const annotation = {
                     tool: 'text',
                     x: this.startX,
                     y: this.startY,
@@ -80,7 +83,10 @@ export class AnnotationManager {
                     fontSize: settings.textSize,
                     fontWeight: settings.textWeight,
                     fontFamily: settings.textFont
-                });
+                };
+                this.annotations.push(annotation);
+                this.redraw();
+                this.notifyAction({ type: 'annotation', data: annotation });
             }
             this.isDrawing = false;
         }
@@ -155,9 +161,9 @@ export class AnnotationManager {
         }
     }
 
-    endDrawing(e, imageData) {
-        // Completes drawing and saves annotation to history
-        if (!this.isDrawing) return null;
+    endDrawing(e) {
+        // Completes drawing, saves the annotation, and reports it for history
+        if (!this.isDrawing) return;
 
         const coords = getCanvasCoordinates(this.canvas, e);
         const endX = coords.x;
@@ -167,16 +173,25 @@ export class AnnotationManager {
         this.isDrawing = false;
 
         if (this.currentTool === 'blur') {
-            return this.applyBlurRegion(endX, endY, settings.blurStrength, imageData, settings.blurGradient);
+            this.commitBlurRegion(endX, endY, settings.blurStrength, settings.blurGradient);
+            return;
         }
 
         if (this.currentTool === 'measure') {
-            this.drawMeasureLine(this.startX, this.startY, endX, endY);
-            const event = new CustomEvent('measurecomplete', {
+            const annotation = {
+                tool: 'measure',
+                startX: this.startX,
+                startY: this.startY,
+                endX,
+                endY
+            };
+            this.annotations.push(annotation);
+            this.redraw();
+            this.notifyAction({ type: 'annotation', data: annotation });
+            document.dispatchEvent(new CustomEvent('measurecomplete', {
                 detail: { startX: this.startX, startY: this.startY, endX, endY }
-            });
-            document.dispatchEvent(event);
-            return null;
+            }));
+            return;
         }
 
         const annotation = {
@@ -192,43 +207,59 @@ export class AnnotationManager {
 
         this.annotations.push(annotation);
         this.redraw();
-        return null;
+        this.notifyAction({ type: 'annotation', data: annotation });
     }
 
-    applyBlurRegion(endX, endY, strength, imageData, useGradient = false) {
-        // Applies blur filter to selected rectangular region
-        const x = Math.floor(Math.min(this.startX, endX));
-        const y = Math.floor(Math.min(this.startY, endY));
+    commitBlurRegion(endX, endY, strength, useGradient = false) {
+        // Records a blur region (parameters only) and reports it for history.
+        // Pixel application is performed by the owner's render pipeline.
+        const x = Math.max(0, Math.floor(Math.min(this.startX, endX)));
+        const y = Math.max(0, Math.floor(Math.min(this.startY, endY)));
         const width = Math.floor(Math.abs(endX - this.startX));
         const height = Math.floor(Math.abs(endY - this.startY));
 
-        if (width <= 5 || height <= 5) return null;
+        if (width <= 5 || height <= 5) return;
 
-        const savedRegion = this.mainCtx.getImageData(x, y, width, height);
-        this.blurHistory.push({ x, y, width, height, imageData: savedRegion });
-        this.blurRegions.push({ x, y, width, height, strength, useGradient });
+        const region = { x, y, width, height, strength, useGradient };
+        this.blurRegions.push(region);
 
-        const regionData = this.mainCtx.getImageData(x, y, width, height);
-        applyBlur(regionData.data, width, height, strength);
-
-        if (useGradient) {
-            this.applyGradientFeather(regionData.data, savedRegion.data, width, height);
-        }
-
-        this.mainCtx.putImageData(regionData, x, y);
-
+        // Brief confirmation outline on the annotation layer
         this.ctx.save();
         this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
         this.ctx.lineWidth = 1;
         this.ctx.strokeRect(x, y, width, height);
         this.ctx.restore();
-
         setTimeout(() => {
             this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
             this.redraw();
         }, 500);
 
-        return this.mainCtx.getImageData(0, 0, this.mainCanvas.width, this.mainCanvas.height);
+        this.notifyAction({ type: 'blur', data: region });
+    }
+
+    applyBlursTo(ctx) {
+        // Applies all blur regions to the given context from its current
+        // pixels. Called by the render pipeline after enhancements and
+        // filters, so blurs always reflect the live image state.
+        for (const region of this.blurRegions) {
+            const x = Math.max(0, Math.min(region.x, this.mainCanvas.width - 1));
+            const y = Math.max(0, Math.min(region.y, this.mainCanvas.height - 1));
+            const width = Math.min(region.width, this.mainCanvas.width - x);
+            const height = Math.min(region.height, this.mainCanvas.height - y);
+            if (width < 2 || height < 2) continue;
+
+            const regionData = ctx.getImageData(x, y, width, height);
+            const originalData = region.useGradient
+                ? new Uint8ClampedArray(regionData.data)
+                : null;
+
+            applyBlur(regionData.data, width, height, region.strength);
+
+            if (region.useGradient) {
+                this.applyGradientFeather(regionData.data, originalData, width, height);
+            }
+            ctx.putImageData(regionData, x, y);
+        }
     }
 
     applyGradientFeather(blurredData, originalData, width, height) {
@@ -247,6 +278,30 @@ export class AnnotationManager {
                 blurredData[idx + 2] = originalData[idx + 2] * (1 - blend) + blurredData[idx + 2] * blend;
             }
         }
+    }
+
+    addAnnotation(annotation) {
+        // Re-adds an annotation (used by redo)
+        this.annotations.push(annotation);
+        this.redraw();
+    }
+
+    removeAnnotation(annotation) {
+        // Removes a specific annotation (used by undo)
+        const idx = this.annotations.indexOf(annotation);
+        if (idx !== -1) this.annotations.splice(idx, 1);
+        this.redraw();
+    }
+
+    addBlurRegion(region) {
+        // Re-adds a blur region (used by redo); caller re-renders
+        this.blurRegions.push(region);
+    }
+
+    removeBlurRegion(region) {
+        // Removes a specific blur region (used by undo); caller re-renders
+        const idx = this.blurRegions.indexOf(region);
+        if (idx !== -1) this.blurRegions.splice(idx, 1);
     }
 
     drawArrow(fromX, fromY, toX, toY, color, lineWidth) {
@@ -320,7 +375,8 @@ export class AnnotationManager {
     }
 
     redraw() {
-        // Redraws all saved annotations
+        // Redraws all saved annotations (measurements included, so they
+        // survive overlay refreshes instead of vanishing mid-inspection)
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
         for (const ann of this.annotations) {
@@ -364,6 +420,10 @@ export class AnnotationManager {
                     this.drawArrow(ann.startX, ann.startY, ann.endX, ann.endY, ann.color, ann.lineWidth);
                     break;
 
+                case 'measure':
+                    this.drawMeasureLine(ann.startX, ann.startY, ann.endX, ann.endY);
+                    break;
+
                 case 'text': {
                     const font = `${ann.fontWeight || 'normal'} ${ann.fontSize || 16}px ${ann.fontFamily || 'monospace'}`;
                     this.ctx.font = font;
@@ -374,19 +434,6 @@ export class AnnotationManager {
         }
     }
 
-    undo() {
-        // Removes last annotation or restores last blurred region
-        if (this.blurHistory.length > 0) {
-            const lastBlur = this.blurHistory.pop();
-            this.mainCtx.putImageData(lastBlur.imageData, lastBlur.x, lastBlur.y);
-            return this.mainCtx.getImageData(0, 0, this.mainCanvas.width, this.mainCanvas.height);
-        } else if (this.annotations.length > 0) {
-            this.annotations.pop();
-            this.redraw();
-        }
-        return null;
-    }
-
     clear() {
         // Clears all annotations from canvas
         this.annotations = [];
@@ -394,13 +441,8 @@ export class AnnotationManager {
     }
 
     clearBlurs() {
-        // Restores all blurred regions to original state
-        while (this.blurHistory.length > 0) {
-            const blur = this.blurHistory.pop();
-            this.mainCtx.putImageData(blur.imageData, blur.x, blur.y);
-        }
+        // Removes all blur regions; caller re-renders the pipeline
         this.blurRegions = [];
-        return this.mainCtx.getImageData(0, 0, this.mainCanvas.width, this.mainCanvas.height);
     }
 
     setTool(tool) {
@@ -416,38 +458,10 @@ export class AnnotationManager {
         return this.visible;
     }
 
-    hideBlurs() {
-        // Temporarily restores pre-blur image data without modifying history
-        if (this.blurHistory.length === 0) return null;
-        for (const blur of this.blurHistory) {
-            this.mainCtx.putImageData(blur.imageData, blur.x, blur.y);
-        }
-        return this.mainCtx.getImageData(0, 0, this.mainCanvas.width, this.mainCanvas.height);
-    }
-
-    showBlurs() {
-        // Reapplies all blurs from blurRegions without modifying undo history
-        if (this.blurRegions.length === 0) return null;
-        for (const blur of this.blurRegions) {
-            const { x, y, width, height, strength, useGradient } = blur;
-            if (x < 0 || y < 0 || x + width > this.mainCanvas.width || y + height > this.mainCanvas.height) continue;
-
-            const regionData = this.mainCtx.getImageData(x, y, width, height);
-            const originalData = this.mainCtx.getImageData(x, y, width, height);
-            applyBlur(regionData.data, width, height, strength);
-
-            if (useGradient) {
-                this.applyGradientFeather(regionData.data, originalData.data, width, height);
-            }
-            this.mainCtx.putImageData(regionData, x, y);
-        }
-        return this.mainCtx.getImageData(0, 0, this.mainCanvas.width, this.mainCanvas.height);
-    }
-
     reset() {
         // Resets all annotation state
         this.annotations = [];
-        this.blurHistory = [];
         this.blurRegions = [];
+        this.isDrawing = false;
     }
 }

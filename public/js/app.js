@@ -14,8 +14,12 @@ import { TransformManager } from './transform.js';
 import { processEnhancements } from './enhancements.js';
 import { CurvesEditor } from './curves.js';
 import { HistogramDisplay } from './histogram.js';
+import { HistoryManager } from './history.js';
+import { computeELA, parseJPEGInternals, estimateJPEGQuality, extractEmbeddedThumbnail } from './forensics.js';
+import { perspectiveWarp } from './perspective.js';
+import { SuperResolver } from './superres.js';
 import * as Filters from './filters.js';
-import { debounce, throttle, rgbToHex } from './utils.js';
+import { debounce, throttle, rgbToHex, escapeHtml, showToast, loadPrefs, savePrefs } from './utils.js';
 
 class ImageForensicsTool {
     constructor() {
@@ -36,15 +40,30 @@ class ImageForensicsTool {
         this.spacePressed = false;
         this.colorPickerActive = false;
 
+        // Ordered list of applied destructive filters; the render
+        // pipeline replays these from the original image every time, so
+        // filters, blurs, and enhancements always compose consistently
+        // and are individually undoable.
+        this.appliedFilters = [];
+        this.elaActive = false;
+        this.comparing = false;
+        this.perspectivePoints = null; // null = inactive, [] = collecting
+        this.superResolver = null;     // lazy: built on first use
+        this.srBusy = false;
+        this.currentFile = null;
+        this.prefs = loadPrefs();
+
         this.magnifierSettings = {
             level: 3, size: 150, enhancement: 'none',
             showGrid: false, showPixelInfo: true, showCrosshair: true,
-            enabled: true, visible: true
+            enabled: true, visible: true,
+            ...(this.prefs.magnifier || {})
         };
 
         this.enhancements = {
             brightness: 0, contrast: 0, saturation: 0,
-            sharpen: 0, gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0
+            sharpen: 0, sharpenRadius: 2, sharpenThreshold: 0,
+            gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0
         };
 
         this.sectionEnabled = {
@@ -53,8 +72,12 @@ class ImageForensicsTool {
             curves: true
         };
 
+        this.history = new HistoryManager(50);
+        this.history.onChange = () => this.updateHistoryUI();
+
         this.magnifier = new Magnifier(this.magnifierCanvas, this.magnifierCtx, this.magnifierSettings);
         this.annotations = new AnnotationManager(this.annotationCanvas, this.annotationCtx, this.canvas, this.ctx);
+        this.annotations.onAction = (action) => this.recordAnnotationAction(action);
         this.transform = new TransformManager(this.canvas, this.annotationCanvas, this.overlayCanvas);
         this.applyEnhancementsDebounced = debounce(() => this.applyEnhancements(), 50);
         this.curvesEditor = new CurvesEditor(
@@ -64,6 +87,7 @@ class ImageForensicsTool {
         this.histogram = new HistogramDisplay(document.getElementById('histogramCanvas'));
 
         this.initEventListeners();
+        this.restorePrefs();
     }
 
     initEventListeners() {
@@ -88,6 +112,18 @@ class ImageForensicsTool {
         document.getElementById('gamma').addEventListener('input', (e) => {
             this.enhancements.gamma = parseFloat(e.target.value) / 100;
             e.target.parentElement.querySelector('.value').textContent = this.enhancements.gamma.toFixed(2);
+            this.applyEnhancementsDebounced();
+        });
+
+        document.getElementById('sharpenRadius')?.addEventListener('input', (e) => {
+            this.enhancements.sharpenRadius = parseInt(e.target.value);
+            e.target.parentElement.querySelector('.value').textContent = e.target.value + 'px';
+            this.applyEnhancementsDebounced();
+        });
+
+        document.getElementById('sharpenThreshold')?.addEventListener('input', (e) => {
+            this.enhancements.sharpenThreshold = parseInt(e.target.value);
+            e.target.parentElement.querySelector('.value').textContent = e.target.value;
             this.applyEnhancementsDebounced();
         });
 
@@ -124,6 +160,7 @@ class ImageForensicsTool {
         document.getElementById('zoomLevel').addEventListener('input', (e) => {
             this.transform.setZoom(parseInt(e.target.value));
             e.target.parentElement.querySelector('.value').textContent = e.target.value + '%';
+            this.updateZoomStatus(parseInt(e.target.value));
         });
 
         document.getElementById('rotateAngle').addEventListener('input', (e) => {
@@ -243,15 +280,17 @@ class ImageForensicsTool {
 
         this.annotationCanvas.addEventListener('mouseup', (e) => {
             if (!this.spacePressed && !this.colorPickerActive) {
-                const newImageData = this.annotations.endDrawing(e, this.imageData);
-                if (newImageData) this.imageData = newImageData;
+                if (this.perspectivePoints) {
+                    this.addPerspectivePoint(e);
+                } else {
+                    this.annotations.endDrawing(e);
+                }
             }
         });
 
         this.annotationCanvas.addEventListener('mouseleave', (e) => {
-            if (this.annotations.isDrawing && !this.spacePressed) {
-                const newImageData = this.annotations.endDrawing(e, this.imageData);
-                if (newImageData) this.imageData = newImageData;
+            if (this.annotations.isDrawing && !this.spacePressed && !this.colorPickerActive) {
+                this.annotations.endDrawing(e);
             }
         });
 
@@ -265,12 +304,13 @@ class ImageForensicsTool {
         document.getElementById('resetFilters').addEventListener('click', () => this.resetFilters());
         document.getElementById('clearAnnotations').addEventListener('click', () => {
             this.annotations.clear();
-            this.imageData = this.annotations.clearBlurs();
+            this.annotations.clearBlurs();
+            this.history.clear();
+            this.applyEnhancements();
         });
-        document.getElementById('undoAnnotation').addEventListener('click', () => {
-            const newImageData = this.annotations.undo();
-            if (newImageData) this.imageData = newImageData;
-        });
+        document.getElementById('undoAnnotation').addEventListener('click', () => this.undo());
+        document.getElementById('undoBtn')?.addEventListener('click', () => this.undo());
+        document.getElementById('redoBtn')?.addEventListener('click', () => this.redo());
 
         document.addEventListener('keydown', (e) => {
             if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
@@ -295,12 +335,41 @@ class ImageForensicsTool {
                 document.querySelector('[data-tool="colorpicker"]')?.classList.add('active');
                 document.getElementById('togglePicker')?.classList.add('active');
             }
-            if (e.key === 'z' && (e.ctrlKey || e.metaKey)) {
+
+            // Single-key annotation tool selection
+            const toolKeys = { r: 'rect', c: 'circle', b: 'blur', t: 'text', l: 'line', u: 'measure' };
+            if (toolKeys[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
-                const newImageData = this.annotations.undo();
-                if (newImageData) this.imageData = newImageData;
+                this.selectTool(toolKeys[e.key]);
             }
-            if (e.key === ' ') {
+
+            if (e.key === 'Escape') {
+                if (this.perspectivePoints) {
+                    this.cancelPerspective();
+                } else {
+                    this.deselectTool();
+                }
+            }
+
+            if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                if (e.shiftKey) this.redo();
+                else this.undo();
+            }
+            if (e.key === 'y' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                this.redo();
+            }
+
+            // Hold backslash to flash the unmodified original (before/after)
+            if (e.key === '\\' && !this.comparing) {
+                e.preventDefault();
+                this.startCompare();
+            }
+
+            // Only hijack Space when nothing focusable holds focus —
+            // otherwise it breaks keyboard activation of buttons/checkboxes
+            if (e.key === ' ' && (e.target === document.body || e.target.tagName === 'CANVAS')) {
                 e.preventDefault();
                 this.spacePressed = true;
                 wrapper.style.cursor = 'grab';
@@ -312,6 +381,9 @@ class ImageForensicsTool {
                 this.spacePressed = false;
                 wrapper.style.cursor = 'default';
             }
+            if (e.key === '\\') {
+                this.endCompare();
+            }
         });
 
         document.getElementById('toggleAnnotations')?.addEventListener('click', () => {
@@ -320,13 +392,9 @@ class ImageForensicsTool {
             btn.classList.toggle('active', visible);
             this.updateAnnotationVisibilityUI();
             this.overlayCanvas.style.opacity = visible ? '1' : '0';
-            if (visible) {
-                const newData = this.annotations.showBlurs();
-                if (newData) this.imageData = newData;
-            } else {
-                const newData = this.annotations.hideBlurs();
-                if (newData) this.imageData = newData;
-            }
+            // Re-render the full pipeline: when hidden, blurs are simply
+            // not applied; when shown they are recomputed from live pixels
+            this.applyEnhancements();
         });
 
         document.getElementById('toggleMagnifier')?.addEventListener('click', () => {
@@ -412,10 +480,23 @@ class ImageForensicsTool {
             const delta = e.deltaY > 0 ? -10 : 10;
             const currentZoom = this.transform.transform.zoom;
             const newZoom = Math.max(10, Math.min(500, currentZoom + delta));
+            if (newZoom === currentZoom) return;
+
+            // Keep the image point under the cursor fixed: the transformed
+            // bounding rect's center equals layoutCenter + pan, so the pan
+            // correction is proportional to the cursor's offset from it
+            const rect = this.canvas.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const ratio = newZoom / currentZoom;
+            this.transform.transform.panX += (1 - ratio) * (e.clientX - cx);
+            this.transform.transform.panY += (1 - ratio) * (e.clientY - cy);
+
             this.transform.setZoom(newZoom);
             const zoomEl = document.getElementById('zoomLevel');
             zoomEl.value = newZoom;
             zoomEl.parentElement.querySelector('.value').textContent = newZoom + '%';
+            this.updateZoomStatus(newZoom);
         }, { passive: false });
 
         document.addEventListener('paste', (e) => {
@@ -475,6 +556,165 @@ class ImageForensicsTool {
 
         document.getElementById('runOcr')?.addEventListener('click', () => this.runOCR());
         document.getElementById('copyOcrText')?.addEventListener('click', () => this.copyOcrText());
+
+        // Drag & drop image loading onto the canvas area
+        wrapper.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            wrapper.classList.add('drag-over');
+        });
+        wrapper.addEventListener('dragleave', () => wrapper.classList.remove('drag-over'));
+        wrapper.addEventListener('drop', (e) => {
+            e.preventDefault();
+            wrapper.classList.remove('drag-over');
+            const file = e.dataTransfer?.files?.[0];
+            if (file && (file.type.startsWith('image/') || /\.(heic|heif|tiff?|bmp)$/i.test(file.name))) {
+                this.loadImageFile(file);
+            } else if (file) {
+                showToast('Dropped file is not an image.', 'error');
+            }
+        });
+
+        // Fit / 1:1 zoom buttons
+        document.getElementById('zoomFit')?.addEventListener('click', () => this.zoomToFit());
+        document.getElementById('zoomActual')?.addEventListener('click', () => this.setZoomTo(100));
+
+        // Before/after compare (hold)
+        const compareBtn = document.getElementById('compareBtn');
+        if (compareBtn) {
+            compareBtn.addEventListener('mousedown', () => this.startCompare());
+            compareBtn.addEventListener('touchstart', () => this.startCompare());
+            ['mouseup', 'mouseleave', 'touchend'].forEach(ev =>
+                compareBtn.addEventListener(ev, () => this.endCompare()));
+        }
+
+        // Forensics: Error Level Analysis
+        document.getElementById('elaQuality')?.addEventListener('input', (e) => {
+            e.target.parentElement.querySelector('.value').textContent = e.target.value + '%';
+        });
+        document.getElementById('elaAmplify')?.addEventListener('input', (e) => {
+            e.target.parentElement.querySelector('.value').textContent = e.target.value + 'x';
+        });
+        document.getElementById('runEla')?.addEventListener('click', () => this.runELA());
+        document.getElementById('exitEla')?.addEventListener('click', () => this.exitELA());
+
+        // Perspective correction
+        document.getElementById('perspectiveBtn')?.addEventListener('click', () => this.togglePerspective());
+
+        // ML super-resolution
+        document.getElementById('srModel')?.addEventListener('change', (e) => {
+            document.getElementById('srCustomRow').style.display =
+                e.target.value === 'custom' ? 'flex' : 'none';
+            this.superResolver = null; // force re-init on model switch
+        });
+        document.getElementById('srModelFile')?.addEventListener('change', () => {
+            this.superResolver = null;
+        });
+        document.getElementById('runSuperRes')?.addEventListener('click', () => this.runSuperResolution());
+
+        // Persist UI preferences
+        ['magLevel', 'magSize', 'magEnhance', 'magGrid', 'magPixelInfo', 'magCrosshair'].forEach(id => {
+            document.getElementById(id)?.addEventListener('change', () => {
+                const m = this.magnifierSettings;
+                savePrefs({ magnifier: {
+                    level: m.level, size: m.size, enhancement: m.enhancement,
+                    showGrid: m.showGrid, showPixelInfo: m.showPixelInfo, showCrosshair: m.showCrosshair
+                } });
+            });
+        });
+        ['annotationColor', 'lineWidth'].forEach(id => {
+            document.getElementById(id)?.addEventListener('change', (e) => {
+                savePrefs({ [id]: e.target.value });
+            });
+        });
+    }
+
+    restorePrefs() {
+        // Restores persisted UI preferences into controls
+        const p = this.prefs;
+        if (p.annotationColor) {
+            const el = document.getElementById('annotationColor');
+            if (el) el.value = p.annotationColor;
+        }
+        if (p.lineWidth) {
+            const el = document.getElementById('lineWidth');
+            if (el) {
+                el.value = p.lineWidth;
+                el.parentElement.querySelector('.value').textContent = p.lineWidth;
+            }
+        }
+        if (p.panelWidth) {
+            const panel = document.querySelector('.control-panel');
+            if (panel) panel.style.width = p.panelWidth + 'px';
+        }
+        if (p.magnifier) {
+            const m = this.magnifierSettings;
+            const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+            const setCheck = (id, val) => { const el = document.getElementById(id); if (el) el.checked = val; };
+            set('magLevel', m.level);
+            document.getElementById('magLevel')?.parentElement.querySelector('.value') &&
+                (document.getElementById('magLevel').parentElement.querySelector('.value').textContent = m.level + 'x');
+            set('magSize', m.size);
+            document.getElementById('magSize')?.parentElement.querySelector('.value') &&
+                (document.getElementById('magSize').parentElement.querySelector('.value').textContent = m.size);
+            set('magEnhance', m.enhancement);
+            setCheck('magGrid', m.showGrid);
+            setCheck('magPixelInfo', m.showPixelInfo);
+            setCheck('magCrosshair', m.showCrosshair);
+        }
+    }
+
+    updateZoomStatus(zoom) {
+        // Mirrors the current zoom level in the status bar
+        const el = document.getElementById('zoomStatus');
+        if (el) el.textContent = zoom + '%';
+    }
+
+    zoomToFit() {
+        // Sets zoom so the whole image fits inside the canvas wrapper
+        if (!this.originalImage) return;
+        const wrapper = document.querySelector('.canvas-wrapper');
+        const pad = 40;
+        const baseW = this.canvas.offsetWidth || this.canvas.width;
+        const baseH = this.canvas.offsetHeight || this.canvas.height;
+        const scale = Math.min(
+            (wrapper.clientWidth - pad) / baseW,
+            (wrapper.clientHeight - pad) / baseH
+        );
+        this.setZoomTo(Math.max(10, Math.min(500, Math.round(scale * 100))));
+    }
+
+    setZoomTo(zoom) {
+        // Sets an absolute zoom level, recentering the pan
+        this.transform.transform.panX = 0;
+        this.transform.transform.panY = 0;
+        this.transform.setZoom(zoom);
+        const zoomEl = document.getElementById('zoomLevel');
+        if (zoomEl) {
+            zoomEl.value = zoom;
+            zoomEl.parentElement.querySelector('.value').textContent = zoom + '%';
+        }
+        this.updateZoomStatus(zoom);
+    }
+
+    startCompare() {
+        // Temporarily shows the unmodified original image (hold to view)
+        if (!this.originalImage || this.comparing) return;
+        this.comparing = true;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.drawImage(this.originalImage, 0, 0);
+        this.annotationCanvas.style.opacity = '0';
+        this.overlayCanvas.style.opacity = '0';
+        document.getElementById('compareBtn')?.classList.add('active');
+    }
+
+    endCompare() {
+        // Restores the processed view after a compare hold
+        if (!this.comparing) return;
+        this.comparing = false;
+        this.annotationCanvas.style.opacity = this.annotations.visible ? '1' : '0';
+        this.overlayCanvas.style.opacity = this.annotations.visible ? '1' : '0';
+        document.getElementById('compareBtn')?.classList.remove('active');
+        this.applyEnhancements();
     }
 
     updateAnnotationVisibilityUI() {
@@ -494,9 +734,19 @@ class ImageForensicsTool {
     }
 
     loadImage(e) {
-        // Loads image file and initializes canvas
+        // Loads image file from the file input
         const file = e.target.files[0];
         if (!file) return;
+        this.loadImageFile(file);
+    }
+
+    loadImageFile(file) {
+        // Loads an image File and initializes the canvas. Metadata
+        // extraction runs immediately and independently of decoding, so
+        // formats the browser cannot render (HEIC, TIFF) still yield
+        // their hash and EXIF data instead of failing silently.
+        this.currentFile = file;
+        this.extractEXIF(file);
 
         const reader = new FileReader();
         reader.onload = (event) => {
@@ -506,19 +756,28 @@ class ImageForensicsTool {
                 this.originalImage = img;
                 this.setupCanvas();
                 this.drawImage();
-                this.extractEXIF(file);
                 this.updateStatusBar();
                 this.updateThumbnail();
                 this.updateHistogram();
             };
-            img.onerror = () => alert('Failed to load image.');
+            img.onerror = () => {
+                showToast(
+                    `This browser cannot display ${file.type || 'this format'} — metadata and hash were still extracted (see METADATA tab).`,
+                    'warning', 6000
+                );
+            };
             img.src = event.target.result;
         };
         reader.readAsDataURL(file);
     }
 
-    loadImageFromBlob(blob) {
-        // Loads image from a Blob (used by paste and clipboard)
+    loadImageFromBlob(blob, sourceLabel = 'Clipboard') {
+        // Loads image from a Blob (paste, clipboard, URL fetch). Blobs
+        // fetched from URLs retain their metadata, so the full EXIF path
+        // runs here too — previously URL loads never showed any EXIF.
+        this.currentFile = blob;
+        this.extractEXIF(blob, sourceLabel);
+
         const reader = new FileReader();
         reader.onload = (event) => {
             const img = new Image();
@@ -530,17 +789,8 @@ class ImageForensicsTool {
                 this.updateStatusBar();
                 this.updateThumbnail();
                 this.updateHistogram();
-
-                const el = document.getElementById('exifContent');
-                let html = '<div class="meta-section"><h4>FILE INFO</h4><table class="exif-table">';
-                html += `<tr><td class="exif-key">Source</td><td class="exif-value">Clipboard</td></tr>`;
-                html += `<tr><td class="exif-key">Type</td><td class="exif-value">${blob.type || 'Unknown'}</td></tr>`;
-                html += `<tr><td class="exif-key">Size</td><td class="exif-value">${this.formatFileSize(blob.size)}</td></tr>`;
-                html += `<tr><td class="exif-key">Dimensions</td><td class="exif-value">${img.width} × ${img.height}</td></tr>`;
-                html += '</table></div>';
-                el.innerHTML = html;
             };
-            img.onerror = () => alert('Failed to load pasted image.');
+            img.onerror = () => showToast('Failed to load image.', 'error');
             img.src = event.target.result;
         };
         reader.readAsDataURL(blob);
@@ -554,14 +804,14 @@ class ImageForensicsTool {
                 for (const type of item.types) {
                     if (type.startsWith('image/')) {
                         const blob = await item.getType(type);
-                        this.loadImageFromBlob(blob);
+                        this.loadImageFromBlob(blob, 'Clipboard');
                         return;
                     }
                 }
             }
-            alert('No image found in clipboard.');
+            showToast('No image found in clipboard.', 'warning');
         } catch {
-            alert('Could not read clipboard. Try Ctrl+V instead.');
+            showToast('Could not read clipboard. Try Ctrl+V instead.', 'error');
         }
     }
 
@@ -574,14 +824,19 @@ class ImageForensicsTool {
     }
 
     syncAnnotationCanvas() {
-        // Syncs annotation and overlay canvas style dimensions with main canvas display size
+        // Syncs annotation and overlay canvas style dimensions with the
+        // main canvas layout size. offsetWidth/offsetHeight are used
+        // because getBoundingClientRect() includes the CSS zoom/rotation
+        // transform — measuring it while zoomed double-applied the scale
+        // and misaligned the overlay layers after a window resize.
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                const mainRect = this.canvas.getBoundingClientRect();
+                const w = this.canvas.offsetWidth;
+                const h = this.canvas.offsetHeight;
                 const canvasStyle = {
                     position: 'absolute',
-                    width: `${mainRect.width}px`,
-                    height: `${mainRect.height}px`,
+                    width: `${w}px`,
+                    height: `${h}px`,
                     left: '50%', top: '50%',
                     transform: 'translate(-50%, -50%)'
                 };
@@ -600,8 +855,14 @@ class ImageForensicsTool {
     }
 
     applyEnhancements() {
-        // Applies current enhancement settings, respecting section toggles
-        if (!this.originalImage) return;
+        // Re-renders the full pipeline from the original image:
+        // enhancements -> destructive filters (replayed in order) ->
+        // blur regions. Because every layer is recomputed from the
+        // source, undoing any step or toggling visibility can never
+        // leave stale pixels behind.
+        if (!this.originalImage || this.comparing) return;
+        this.elaActive = false;
+        document.getElementById('exitEla')?.classList.add('hidden');
         this.drawImage();
 
         const eff = { ...this.enhancements };
@@ -622,37 +883,417 @@ class ImageForensicsTool {
             ? this.curvesEditor.getLUT() : null;
 
         processEnhancements(this.imageData, eff, this.canvas.width, this.canvas.height, curvesLUT);
+
+        // Replay destructive filters in application order
+        const w = this.canvas.width, h = this.canvas.height;
+        for (const type of this.appliedFilters) {
+            this.runFilter(type, this.imageData.data, w, h);
+        }
+
         this.ctx.putImageData(this.imageData, 0, 0);
 
         if (this.annotations.visible) {
-            const newData = this.annotations.showBlurs();
-            if (newData) this.imageData = newData;
+            this.annotations.applyBlursTo(this.ctx);
+            this.imageData = this.ctx.getImageData(0, 0, w, h);
         }
 
         this.updateHistogram();
+        this.updateEnhanceTabIndicator();
     }
 
-    applyFilter(type) {
-        // Applies selected filter to current image data
-        if (!this.originalImage) return;
-        const data = this.imageData.data;
-        const w = this.canvas.width, h = this.canvas.height;
-
+    runFilter(type, data, w, h) {
+        // Executes a single named filter against pixel data
         switch (type) {
             case 'grayscale': Filters.applyGrayscale(data); break;
             case 'invert': Filters.applyInvert(data); break;
             case 'edge': Filters.applyEdgeDetection(data, w, h); break;
             case 'emboss': Filters.applyEmboss(data, w, h); break;
             case 'histogram': Filters.equalizeHistogram(data); break;
+            case 'clahe': Filters.applyCLAHE(data, w, h); break;
             case 'noise': Filters.applyDenoising(data, w, h); break;
+            case 'whitebalance': Filters.applyAutoWhiteBalance(data); break;
+            case 'dehaze': Filters.applyDehaze(data, w, h); break;
+        }
+    }
+
+    applyFilter(type) {
+        // Adds a destructive filter to the pipeline as an undoable command
+        if (!this.originalImage) return;
+
+        this.appliedFilters.push(type);
+        this.history.push({
+            label: 'Filter: ' + type,
+            undo: () => {
+                const idx = this.appliedFilters.lastIndexOf(type);
+                if (idx !== -1) this.appliedFilters.splice(idx, 1);
+                this.updateFilterButtons();
+                this.applyEnhancements();
+            },
+            redo: () => {
+                this.appliedFilters.push(type);
+                this.updateFilterButtons();
+                this.applyEnhancements();
+            }
+        });
+        this.updateFilterButtons();
+        this.applyEnhancements();
+    }
+
+    updateFilterButtons() {
+        // Reflects which filters are currently in the pipeline
+        document.querySelectorAll('.filter-btn[data-filter]').forEach(btn => {
+            const count = this.appliedFilters.filter(f => f === btn.dataset.filter).length;
+            btn.classList.toggle('active', count > 0);
+            if (count > 1) btn.dataset.count = count;
+            else btn.removeAttribute('data-count');
+        });
+    }
+
+    updateEnhanceTabIndicator() {
+        // Marks the Enhance tab when any non-default adjustment is active
+        const d = this.enhancements;
+        const modified = d.brightness !== 0 || d.contrast !== 0 || d.saturation !== 0 ||
+            d.sharpen !== 0 || d.gamma !== 1.0 ||
+            d.balanceR !== 0 || d.balanceG !== 0 || d.balanceB !== 0 ||
+            !this.curvesEditor.isIdentity() || this.appliedFilters.length > 0;
+        document.querySelector('.tab-btn[data-tab="enhance"]')?.classList.toggle('modified', modified);
+    }
+
+    recordAnnotationAction(action) {
+        // Records annotation/blur actions from the AnnotationManager on
+        // the unified history stack, in strict chronological order
+        if (action.type === 'annotation') {
+            const ann = action.data;
+            this.history.push({
+                label: 'Annotation: ' + ann.tool,
+                undo: () => this.annotations.removeAnnotation(ann),
+                redo: () => this.annotations.addAnnotation(ann)
+            });
+        } else if (action.type === 'blur') {
+            const region = action.data;
+            this.history.push({
+                label: `Blur region (${region.width}\u00D7${region.height})`,
+                undo: () => {
+                    this.annotations.removeBlurRegion(region);
+                    this.applyEnhancements();
+                },
+                redo: () => {
+                    this.annotations.addBlurRegion(region);
+                    this.applyEnhancements();
+                }
+            });
+            // Render the new blur through the live pipeline immediately
+            this.applyEnhancements();
+        }
+    }
+
+    undo() {
+        // Reverts the most recent action of any type
+        if (!this.history.undo()) showToast('Nothing to undo.', 'info', 1500);
+    }
+
+    redo() {
+        // Re-applies the most recently undone action
+        if (!this.history.redo()) showToast('Nothing to redo.', 'info', 1500);
+    }
+
+    updateHistoryUI() {
+        // Renders the session history (audit trail) and button states
+        const list = document.getElementById('historyList');
+        if (list) {
+            const entries = this.history.entries();
+            list.innerHTML = entries.length === 0
+                ? '<p class="no-data">No actions yet</p>'
+                : entries.map((label, i) =>
+                    `<div class="history-entry"><span class="history-num">${i + 1}</span>${escapeHtml(label)}</div>`
+                ).join('');
+            list.scrollTop = list.scrollHeight;
+        }
+        const undoBtn = document.getElementById('undoBtn');
+        const redoBtn = document.getElementById('redoBtn');
+        if (undoBtn) undoBtn.disabled = !this.history.canUndo;
+        if (redoBtn) redoBtn.disabled = !this.history.canRedo;
+    }
+
+    async runELA() {
+        // Renders an Error Level Analysis view: the image is re-encoded
+        // as JPEG at a known quality and the amplified difference is
+        // shown. Edited-and-resaved regions compress differently and
+        // stand out against the uniform error level of untouched areas.
+        if (!this.originalImage) {
+            showToast('Please load an image first.', 'warning');
+            return;
+        }
+        const quality = parseInt(document.getElementById('elaQuality')?.value || 75) / 100;
+        const amplify = parseInt(document.getElementById('elaAmplify')?.value || 15);
+        const btn = document.getElementById('runEla');
+        if (btn) { btn.disabled = true; btn.textContent = 'ANALYZING...'; }
+
+        try {
+            // Analyze the unmodified original so enhancement settings
+            // don't contaminate the error levels
+            const srcCanvas = document.createElement('canvas');
+            srcCanvas.width = this.canvas.width;
+            srcCanvas.height = this.canvas.height;
+            srcCanvas.getContext('2d').drawImage(this.originalImage, 0, 0);
+
+            const elaData = await computeELA(srcCanvas, quality, amplify);
+            this.ctx.putImageData(elaData, 0, 0);
+            this.imageData = elaData;
+            this.elaActive = true;
+            this.updateHistogram();
+            document.getElementById('exitEla')?.classList.remove('hidden');
+            showToast('ELA view active — uniform noise is normal; bright, sharply-bounded regions warrant a closer look.', 'info', 6000);
+        } catch (err) {
+            showToast('ELA failed: ' + (err.message || 'unknown error'), 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'RUN ELA'; }
+        }
+    }
+
+    exitELA() {
+        // Leaves the ELA view and restores the normal pipeline
+        this.elaActive = false;
+        this.applyEnhancements();
+    }
+
+    togglePerspective() {
+        // Starts or cancels four-point perspective correction
+        if (this.perspectivePoints) {
+            this.cancelPerspective();
+            return;
+        }
+        if (!this.originalImage) {
+            showToast('Please load an image first.', 'warning');
+            return;
+        }
+        if (this.transform.transform.rotate !== 0 || this.transform.transform.flipH || this.transform.transform.flipV) {
+            showToast('Reset rotation/flip before perspective correction.', 'warning');
+            return;
+        }
+        this.perspectivePoints = [];
+        this.deselectTool();
+        document.getElementById('perspectiveBtn')?.classList.add('active');
+        showToast('Click the 4 corners of the region to straighten (Esc to cancel).', 'info', 5000);
+    }
+
+    cancelPerspective() {
+        // Cancels perspective point collection and clears markers
+        this.perspectivePoints = null;
+        document.getElementById('perspectiveBtn')?.classList.remove('active');
+        this.annotations.redraw();
+    }
+
+    addPerspectivePoint(e) {
+        // Collects a perspective corner point; warps after the fourth
+        const rect = this.annotationCanvas.getBoundingClientRect();
+        const scaleX = this.annotationCanvas.width / rect.width;
+        const scaleY = this.annotationCanvas.height / rect.height;
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
+
+        this.perspectivePoints.push({ x, y });
+
+        // Marker feedback
+        const ctx = this.annotationCtx;
+        const scale = this.annotations.getScaleFactor();
+        ctx.save();
+        ctx.fillStyle = '#78e030';
+        ctx.strokeStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(x, y, 6 * scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#000';
+        ctx.font = `bold ${10 * scale}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(this.perspectivePoints.length), x, y);
+        ctx.restore();
+
+        if (this.perspectivePoints.length === 4) {
+            this.applyPerspective(this.perspectivePoints);
+            this.perspectivePoints = null;
+            document.getElementById('perspectiveBtn')?.classList.remove('active');
+        }
+    }
+
+    applyPerspective(corners) {
+        // Warps the marked quadrilateral to an upright rectangle and
+        // swaps it in as the working image (undoable, like crop)
+        const srcCanvas = document.createElement('canvas');
+        srcCanvas.width = this.canvas.width;
+        srcCanvas.height = this.canvas.height;
+        srcCanvas.getContext('2d').drawImage(this.canvas, 0, 0);
+
+        const warped = perspectiveWarp(srcCanvas, corners);
+        if (!warped) {
+            showToast('Could not compute perspective warp from those points.', 'error');
+            this.annotations.redraw();
+            return;
         }
 
-        this.ctx.putImageData(this.imageData, 0, 0);
-        this.updateHistogram();
+        this.swapWorkingImage(warped.toDataURL(), 'Perspective correction');
+    }
+
+    swapWorkingImage(dataUrl, label) {
+        // Replaces the working image (crop / perspective), recording an
+        // undoable command that restores the previous image and state
+        const prevImage = this.originalImage;
+        const prevFilters = [...this.appliedFilters];
+        const prevBlurs = [...this.annotations.blurRegions];
+        const prevAnnotations = [...this.annotations.annotations];
+
+        const newImage = new Image();
+        newImage.onload = () => {
+            const applyNew = () => {
+                this.originalImage = newImage;
+                this.annotations.reset();
+                this.appliedFilters = [];
+                this.resetTransformUI();
+                this.setupCanvas();
+                this.updateFilterButtons();
+                this.applyEnhancements();
+                this.updateStatusBar();
+                this.updateThumbnail();
+            };
+
+            applyNew();
+
+            this.history.push({
+                label,
+                undo: () => {
+                    this.originalImage = prevImage;
+                    this.annotations.annotations = [...prevAnnotations];
+                    this.annotations.blurRegions = [...prevBlurs];
+                    this.appliedFilters = [...prevFilters];
+                    this.resetTransformUI();
+                    this.setupCanvas();
+                    this.updateFilterButtons();
+                    this.applyEnhancements();
+                    this.annotations.redraw();
+                    this.updateStatusBar();
+                    this.updateThumbnail();
+                },
+                redo: applyNew
+            });
+        };
+        newImage.src = dataUrl;
+    }
+
+    resetTransformUI() {
+        // Resets transform state and its UI controls
+        this.transform.reset();
+        document.getElementById('zoomLevel').value = 100;
+        document.getElementById('rotateAngle').value = 0;
+        document.getElementById('zoomLevel').parentElement.querySelector('.value').textContent = '100%';
+        document.getElementById('rotateAngle').parentElement.querySelector('.value').textContent = '0°';
+        document.getElementById('flipH').classList.remove('active');
+        document.getElementById('flipV').classList.remove('active');
+        this.updateZoomStatus(100);
+    }
+
+    setSrProgress(text, fraction = null) {
+        // Updates the super-resolution progress UI
+        const wrap = document.getElementById('srProgress');
+        const fill = document.getElementById('srProgressFill');
+        const label = document.getElementById('srProgressText');
+        if (!wrap) return;
+        if (text === null) {
+            wrap.style.display = 'none';
+            return;
+        }
+        wrap.style.display = 'block';
+        if (label) label.textContent = text;
+        if (fill && fraction !== null) fill.style.width = Math.round(fraction * 100) + '%';
+    }
+
+    async runSuperResolution() {
+        // Upscales the working image with an in-browser neural network.
+        // The result replaces the working image as an undoable command,
+        // exactly like crop and perspective correction.
+        if (this.srBusy) return;
+        if (!this.originalImage) {
+            showToast('Please load an image first.', 'warning');
+            return;
+        }
+
+        const W = this.originalImage.width;
+        const H = this.originalImage.height;
+        const megapixels = (W * H) / 1e6;
+
+        // Neural upscaling cost grows with area; protect the tab.
+        if (W * H > 2048 * 2048) {
+            showToast('Image is too large for in-browser super-resolution (max ~4 MP). Crop to the region of interest first.', 'warning', 6000);
+            return;
+        }
+        if (megapixels > 1) {
+            showToast(`Large image (${megapixels.toFixed(1)} MP) — this may take a while. For faster results, crop to the region of interest first.`, 'info', 5000);
+        }
+
+        const btn = document.getElementById('runSuperRes');
+        const modelChoice = document.getElementById('srModel')?.value || 'builtin';
+        this.srBusy = true;
+        if (btn) { btn.disabled = true; btn.textContent = 'WORKING...'; }
+
+        try {
+            // Initialize (or reuse) the requested model
+            if (!this.superResolver) {
+                this.setSrProgress('Loading ONNX Runtime...', 0);
+                const resolver = new SuperResolver();
+                if (modelChoice === 'custom') {
+                    const fileInput = document.getElementById('srModelFile');
+                    const file = fileInput?.files?.[0];
+                    if (!file) {
+                        showToast('Choose a .onnx model file first.', 'warning');
+                        return;
+                    }
+                    this.setSrProgress('Initializing custom model...', 0);
+                    await resolver.loadCustom(await file.arrayBuffer(), file.name);
+                    this.setSrProgress('Probing model scale...', 0);
+                    await resolver.probeScale();
+                } else {
+                    await resolver.loadBuiltin((status) => this.setSrProgress(status, 0));
+                }
+                this.superResolver = resolver;
+            }
+
+            // Run on the unmodified working image, like ELA: enhancement
+            // settings stay non-destructive and re-apply to the result
+            const srcCanvas = document.createElement('canvas');
+            srcCanvas.width = W;
+            srcCanvas.height = H;
+            srcCanvas.getContext('2d').drawImage(this.originalImage, 0, 0);
+
+            const result = await this.superResolver.upscale(srcCanvas, (done, total) => {
+                this.setSrProgress(`Processing tile ${done}/${total}...`, done / total);
+            });
+
+            this.setSrProgress('Finalizing...', 1);
+            this.swapWorkingImage(result.toDataURL(), `Super-resolution (${this.superResolver.scale}x, ${this.superResolver.label})`);
+            showToast(`Upscaled ${W}\u00D7${H} \u2192 ${result.width}\u00D7${result.height} with ${this.superResolver.label}. Ctrl+Z to revert.`, 'success', 5000);
+        } catch (err) {
+            console.error('Super-resolution failed:', err);
+            showToast('Super-resolution failed: ' + (err.message || 'unknown error'), 'error', 6000);
+            this.superResolver = null;
+        } finally {
+            this.srBusy = false;
+            this.setSrProgress(null);
+            if (btn) { btn.disabled = false; btn.textContent = 'UPSCALE IMAGE'; }
+        }
     }
 
     toggleCrop() {
-        // Toggles crop mode and applies crop when selection exists
+        // Toggles crop mode and applies crop when selection exists.
+        // Crop selection is drawn in untransformed canvas space, so it
+        // cannot be meaningfully mapped while the view is rotated or
+        // flipped — refuse to enter crop mode in that state.
+        if (!this.transform.cropMode &&
+            (this.transform.transform.rotate !== 0 || this.transform.transform.flipH || this.transform.transform.flipV)) {
+            showToast('Reset rotation/flip before cropping — the selection would not match the rotated view.', 'warning', 4500);
+            return;
+        }
+
         const cropRect = this.transform.toggleCrop(
             this.annotationCtx,
             () => this.annotations.redraw()
@@ -668,33 +1309,14 @@ class ImageForensicsTool {
     }
 
     applyCrop(rect) {
-        // Crops image to specified rectangle
+        // Crops image to specified rectangle (undoable)
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = rect.width;
         tempCanvas.height = rect.height;
         const tempCtx = tempCanvas.getContext('2d');
         tempCtx.drawImage(this.canvas, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
 
-        const newImage = new Image();
-        newImage.onload = () => {
-            this.originalImage = newImage;
-            this.annotations.reset();
-
-            this.transform.reset();
-            document.getElementById('zoomLevel').value = 100;
-            document.getElementById('rotateAngle').value = 0;
-            document.getElementById('zoomLevel').parentElement.querySelector('.value').textContent = '100%';
-            document.getElementById('rotateAngle').parentElement.querySelector('.value').textContent = '0°';
-            document.getElementById('flipH').classList.remove('active');
-            document.getElementById('flipV').classList.remove('active');
-
-            this.setupCanvas();
-            this.drawImage();
-            this.applyEnhancements();
-            this.updateStatusBar();
-            this.updateThumbnail();
-        };
-        newImage.src = tempCanvas.toDataURL();
+        this.swapWorkingImage(tempCanvas.toDataURL(), `Crop (${rect.width}\u00D7${rect.height})`);
         this.transform.clearCrop();
     }
 
@@ -859,9 +1481,18 @@ class ImageForensicsTool {
         // Resets entire application state
         this.originalImage = null;
         this.imageData = null;
+        this.currentFile = null;
         this.watermarkSettings = null;
         this.captionSettings = null;
         this.colorPickerActive = false;
+        this.comparing = false;
+        this.elaActive = false;
+        this.appliedFilters = [];
+        this.cancelPerspective?.();
+        this.history.clear();
+        this.updateHistoryUI();
+        this.updateFilterButtons();
+        document.getElementById('exitEla')?.classList.add('hidden');
         this.annotations.reset();
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         this.annotationCtx.clearRect(0, 0, this.annotationCanvas.width, this.annotationCanvas.height);
@@ -905,6 +1536,12 @@ class ImageForensicsTool {
         this.watermarkSettings = null;
         this.captionSettings = null;
         this.colorPickerActive = false;
+        this.comparing = false;
+        this.elaActive = false;
+        this.cancelPerspective();
+        document.getElementById('exitEla')?.classList.add('hidden');
+        this.history.clear();
+        this.updateHistoryUI();
         this.annotations.reset();
         this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
         this.annotationCtx.clearRect(0, 0, this.annotationCanvas.width, this.annotationCanvas.height);
@@ -920,12 +1557,16 @@ class ImageForensicsTool {
     }
 
     resetEnhancements() {
-        // Resets all enhancement and transform values
+        // Resets all enhancement, filter, and transform values
         this.enhancements = {
             brightness: 0, contrast: 0, saturation: 0,
-            sharpen: 0, gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0
+            sharpen: 0, sharpenRadius: 2, sharpenThreshold: 0,
+            gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0
         };
+        this.appliedFilters = [];
+        this.updateFilterButtons();
         this.transform.reset();
+        this.updateZoomStatus(100);
         this.curvesEditor.reset();
 
         this.sectionEnabled = { adjustments: true, colorBalance: true, curves: true };
@@ -964,8 +1605,7 @@ class ImageForensicsTool {
 
         if (this.transform.cropMode) this.toggleCrop();
         if (this.originalImage) {
-            this.drawImage();
-            this.updateHistogram();
+            this.applyEnhancements();
         }
     }
 
@@ -973,7 +1613,8 @@ class ImageForensicsTool {
         // Resets adjustment sliders only
         this.enhancements = {
             brightness: 0, contrast: 0, saturation: 0,
-            sharpen: 0, gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0
+            sharpen: 0, sharpenRadius: 2, sharpenThreshold: 0,
+            gamma: 1.0, balanceR: 0, balanceG: 0, balanceB: 0
         };
 
         this.sectionEnabled = { adjustments: true, colorBalance: true, curves: true };
@@ -998,15 +1639,15 @@ class ImageForensicsTool {
         this.curvesEditor.reset();
 
         if (this.originalImage) {
-            this.drawImage();
             this.applyEnhancements();
         }
     }
 
     resetFilters() {
-        // Resets destructive filters by re-drawing from original and re-applying enhancements
+        // Clears all applied destructive filters and re-renders
         if (!this.originalImage) return;
-        this.drawImage();
+        this.appliedFilters = [];
+        this.updateFilterButtons();
         this.applyEnhancements();
     }
 
@@ -1033,6 +1674,7 @@ class ImageForensicsTool {
         document.getElementById('rotateAngle').parentElement.querySelector('.value').textContent = '0°';
         document.getElementById('flipH').classList.remove('active');
         document.getElementById('flipV').classList.remove('active');
+        this.updateZoomStatus(100);
         if (this.transform.cropMode) this.toggleCrop();
     }
 
@@ -1074,86 +1716,179 @@ class ImageForensicsTool {
                 setTimeout(() => { span.textContent = 'COPY'; }, 1500);
             }
         } catch {
-            alert('Could not copy to clipboard.');
+            showToast('Could not copy to clipboard.', 'error');
         }
     }
 
-    async extractEXIF(file) {
-        // Extracts and displays file metadata, hash, and EXIF data
+    async extractEXIF(file, sourceLabel = null) {
+        // Extracts and displays file metadata, hash, EXIF data, JPEG
+        // internals (quantization tables), and the embedded thumbnail.
+        // All values are HTML-escaped: EXIF strings are attacker-
+        // controllable, and unescaped innerHTML here was an XSS vector.
         const el = document.getElementById('exifContent');
         let html = '';
 
+        let arrayBuffer = null;
         let imageHash = '';
         try {
-            const arrayBuffer = await file.arrayBuffer();
+            arrayBuffer = await file.arrayBuffer();
             imageHash = await this.computeImageHash(arrayBuffer);
         } catch {
             imageHash = 'Unable to compute';
         }
 
         html += '<div class="meta-section"><h4>FILE INFO</h4><table class="exif-table">';
-        html += `<tr><td class="exif-key">Name</td><td class="exif-value">${file.name}</td></tr>`;
-        html += `<tr><td class="exif-key">Size</td><td class="exif-value">${this.formatFileSize(file.size)}</td></tr>`;
-        html += `<tr><td class="exif-key">Type</td><td class="exif-value">${file.type || 'Unknown'}</td></tr>`;
-        html += `<tr><td class="exif-key">Modified</td><td class="exif-value">${new Date(file.lastModified).toLocaleString()}</td></tr>`;
-        if (this.originalImage) {
-            html += `<tr><td class="exif-key">Dimensions</td><td class="exif-value">${this.originalImage.width} × ${this.originalImage.height}</td></tr>`;
+        if (sourceLabel) {
+            html += `<tr><td class="exif-key">Source</td><td class="exif-value">${escapeHtml(sourceLabel)}</td></tr>`;
+        }
+        if (file.name) {
+            html += `<tr><td class="exif-key">Name</td><td class="exif-value">${escapeHtml(file.name)}</td></tr>`;
+        }
+        html += `<tr><td class="exif-key">Size</td><td class="exif-value">${escapeHtml(this.formatFileSize(file.size))}</td></tr>`;
+        html += `<tr><td class="exif-key">Type</td><td class="exif-value">${escapeHtml(file.type || 'Unknown')}</td></tr>`;
+        if (file.lastModified) {
+            html += `<tr><td class="exif-key">Modified</td><td class="exif-value">${escapeHtml(new Date(file.lastModified).toLocaleString())}</td></tr>`;
         }
         html += '</table></div>';
 
         html += '<div class="meta-section"><h4>FILE HASH</h4><table class="exif-table">';
-        html += `<tr><td class="exif-key">SHA-256</td><td class="exif-value hash-value">${imageHash}</td></tr>`;
+        html += `<tr><td class="exif-key">SHA-256</td><td class="exif-value hash-value">${escapeHtml(imageHash)}` +
+            ` <button class="copy-meta-btn" data-copy="${escapeHtml(imageHash)}" title="Copy hash">COPY</button></td></tr>`;
         html += '</table></div>';
 
+        let exifData = null;
+        let parseError = null;
         try {
-            const exifData = await exifr.parse(file, { translateKeys: true, translateValues: true });
+            // Full option set: the full exifr build parses PNG/TIFF
+            // containers plus IPTC and ICC blocks the lite build lacked
+            exifData = await exifr.parse(file, {
+                translateKeys: true,
+                translateValues: true,
+                iptc: true,
+                icc: true,
+                xmp: true
+            });
+        } catch (err) {
+            parseError = err;
+            console.error('EXIF parse error:', err);
+        }
 
-            if (exifData && Object.keys(exifData).length > 0) {
-                const cameraFields = ['Make', 'Model', 'LensModel', 'Software'];
-                const settingsFields = ['ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'Flash', 'WhiteBalance'];
-                const dateFields = ['DateTime', 'DateTimeOriginal', 'DateTimeDigitized'];
+        if (exifData && Object.keys(exifData).length > 0) {
+            const cameraFields = ['Make', 'Model', 'LensModel', 'Software'];
+            const settingsFields = ['ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'Flash', 'WhiteBalance', 'Orientation'];
+            // exifr translates tag 0x0132 (DateTime) to ModifyDate and
+            // DateTimeDigitized to CreateDate — the old names never matched
+            const dateFields = ['DateTimeOriginal', 'CreateDate', 'ModifyDate', 'OffsetTimeOriginal'];
 
-                const cameraData = this.filterExifFields(exifData, cameraFields);
-                const settingsData = this.filterExifFields(exifData, settingsFields);
-                const dateData = this.filterExifFields(exifData, dateFields);
+            const cameraData = this.filterExifFields(exifData, cameraFields);
+            const settingsData = this.filterExifFields(exifData, settingsFields);
+            const dateData = this.filterExifFields(exifData, dateFields);
 
-                if (Object.keys(cameraData).length > 0) {
-                    html += '<div class="meta-section"><h4>CAMERA</h4>';
-                    html += this.buildExifTable(cameraData);
-                    html += '</div>';
-                }
-
-                if (Object.keys(settingsData).length > 0) {
-                    html += '<div class="meta-section"><h4>SETTINGS</h4>';
-                    html += this.buildExifTable(settingsData);
-                    html += '</div>';
-                }
-
-                if (Object.keys(dateData).length > 0) {
-                    html += '<div class="meta-section"><h4>DATE/TIME</h4>';
-                    html += this.buildExifTable(dateData);
-                    html += '</div>';
-                }
-
-                if (exifData.latitude && exifData.longitude) {
-                    html += `<div class="meta-section"><h4>LOCATION</h4>
-                        <div class="gps-info">
-                            <table class="exif-table">
-                                <tr><td class="exif-key">Latitude</td><td class="exif-value">${exifData.latitude.toFixed(6)}</td></tr>
-                                <tr><td class="exif-key">Longitude</td><td class="exif-value">${exifData.longitude.toFixed(6)}</td></tr>
-                            </table>
-                            <a href="https://maps.google.com/?q=${exifData.latitude},${exifData.longitude}" target="_blank" class="map-link">VIEW ON MAP</a>
-                        </div>
-                    </div>`;
-                }
-            } else {
-                html += '<div class="meta-section"><h4>EXIF DATA</h4><p class="no-data">Could not find any EXIF data</p></div>';
+            if (Object.keys(cameraData).length > 0) {
+                html += '<div class="meta-section"><h4>CAMERA</h4>' + this.buildExifTable(cameraData) + '</div>';
             }
-        } catch {
-            html += '<div class="meta-section"><h4>EXIF DATA</h4><p class="no-data">Could not find any EXIF data</p></div>';
+            if (Object.keys(settingsData).length > 0) {
+                html += '<div class="meta-section"><h4>SETTINGS</h4>' + this.buildExifTable(settingsData) + '</div>';
+            }
+            if (Object.keys(dateData).length > 0) {
+                html += '<div class="meta-section"><h4>DATE/TIME</h4>' + this.buildExifTable(dateData) + '</div>';
+            }
+
+            if (exifData.latitude && exifData.longitude) {
+                const lat = Number(exifData.latitude);
+                const lon = Number(exifData.longitude);
+                const d = 0.005;
+                const bbox = `${lon - d},${lat - d},${lon + d},${lat + d}`;
+                html += `<div class="meta-section"><h4>LOCATION</h4>
+                    <div class="gps-info">
+                        <table class="exif-table">
+                            <tr><td class="exif-key">Latitude</td><td class="exif-value">${lat.toFixed(6)}</td></tr>
+                            <tr><td class="exif-key">Longitude</td><td class="exif-value">${lon.toFixed(6)}</td></tr>
+                            ${exifData.GPSAltitude !== undefined ? `<tr><td class="exif-key">Altitude</td><td class="exif-value">${escapeHtml(String(exifData.GPSAltitude))} m</td></tr>` : ''}
+                        </table>
+                        <iframe class="gps-map-embed" loading="lazy"
+                            src="https://www.openstreetmap.org/export/embed.html?bbox=${encodeURIComponent(bbox)}&layer=mapnik&marker=${lat},${lon}"></iframe>
+                        <div class="gps-links">
+                            <a href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}" target="_blank" rel="noopener" class="map-link">OPENSTREETMAP</a>
+                            <a href="https://maps.google.com/?q=${lat},${lon}" target="_blank" rel="noopener" class="map-link">GOOGLE MAPS</a>
+                        </div>
+                    </div>
+                </div>`;
+            }
+
+            // Collapsible raw dump of every parsed field
+            const rawRows = Object.entries(exifData)
+                .filter(([, v]) => typeof v !== 'object' || v instanceof Date)
+                .map(([k, v]) => {
+                    const val = v instanceof Date ? v.toLocaleString() : String(v);
+                    return `<tr><td class="exif-key">${escapeHtml(k)}</td><td class="exif-value">${escapeHtml(val)}</td></tr>`;
+                }).join('');
+            if (rawRows) {
+                html += `<div class="meta-section"><details class="raw-exif">
+                    <summary>RAW METADATA DUMP (${Object.keys(exifData).length} fields)</summary>
+                    <table class="exif-table">${rawRows}</table>
+                </details></div>`;
+            }
+        } else if (parseError) {
+            html += '<div class="meta-section"><h4>EXIF DATA</h4><p class="no-data">Could not parse metadata for this format' +
+                ` (${escapeHtml(parseError.message || 'parser error')})</p></div>`;
+        } else {
+            html += '<div class="meta-section"><h4>EXIF DATA</h4><p class="no-data">No EXIF data present in this file</p></div>';
+        }
+
+        // JPEG internals: quantization tables fingerprint the encoder
+        if (arrayBuffer) {
+            const jpeg = parseJPEGInternals(arrayBuffer);
+            if (jpeg && jpeg.quantTables.length > 0) {
+                html += '<div class="meta-section"><h4>JPEG INTERNALS</h4>';
+                if (jpeg.frame) {
+                    html += `<table class="exif-table">
+                        <tr><td class="exif-key">Encoding</td><td class="exif-value">${jpeg.progressive ? 'Progressive' : 'Baseline'}</td></tr>
+                        <tr><td class="exif-key">Bit depth</td><td class="exif-value">${jpeg.frame.bitDepth}</td></tr>
+                        <tr><td class="exif-key">Components</td><td class="exif-value">${jpeg.frame.components}</td></tr>
+                        <tr><td class="exif-key">Est. quality</td><td class="exif-value">~${estimateJPEGQuality(jpeg.quantTables[0].values)} (IJG scale)</td></tr>
+                    </table>`;
+                }
+                html += '<p class="section-hint">Quantization tables are a fingerprint of the encoding software/quality — re-saving an image replaces them.</p>';
+                jpeg.quantTables.forEach((qt) => {
+                    const labels = ['LUMINANCE', 'CHROMINANCE'];
+                    html += `<div class="quant-table-wrap"><div class="quant-label">DQT ${qt.id} ${labels[qt.id] || ''} (${qt.precision}-bit)</div><div class="quant-table">`;
+                    html += qt.values.map(v => `<span>${v}</span>`).join('');
+                    html += '</div></div>';
+                });
+                html += '</div>';
+            }
         }
 
         el.innerHTML = html;
+
+        el.querySelectorAll('.copy-meta-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+                    btn.textContent = 'COPIED';
+                    setTimeout(() => { btn.textContent = 'COPY'; }, 1500);
+                }).catch(() => {});
+            });
+        });
+
+        // Embedded EXIF thumbnail: appended asynchronously; a thumbnail
+        // that doesn't match the main image betrays post-capture editing
+        this.appendEmbeddedThumbnail(file, el);
+    }
+
+    async appendEmbeddedThumbnail(file, el) {
+        // Extracts and displays the EXIF-embedded thumbnail for comparison
+        try {
+            const thumbUrl = await extractEmbeddedThumbnail(file);
+            if (!thumbUrl) return;
+            const section = document.createElement('div');
+            section.className = 'meta-section';
+            section.innerHTML = `<h4>EMBEDDED THUMBNAIL</h4>
+                <p class="section-hint">Cameras embed this at capture time. If it doesn't match the main image, the file was edited after capture.</p>
+                <div class="thumb-compare"><img class="embedded-thumb" alt="Embedded EXIF thumbnail"></div>`;
+            section.querySelector('img').src = thumbUrl;
+            el.appendChild(section);
+        } catch {}
     }
 
     formatFileSize(bytes) {
@@ -1177,7 +1912,7 @@ class ImageForensicsTool {
     }
 
     buildExifTable(data) {
-        // Builds HTML table from EXIF key-value pairs
+        // Builds HTML table from EXIF key-value pairs (all values escaped)
         let html = '<table class="exif-table">';
         Object.entries(data).forEach(([key, value]) => {
             const displayKey = key.replace(/([A-Z])/g, ' $1').trim();
@@ -1185,17 +1920,15 @@ class ImageForensicsTool {
             if (value instanceof Date) {
                 displayValue = value.toLocaleString();
             }
-            html += `<tr><td class="exif-key">${displayKey}</td><td class="exif-value">${displayValue}</td></tr>`;
+            html += `<tr><td class="exif-key">${escapeHtml(displayKey)}</td><td class="exif-value">${escapeHtml(String(displayValue))}</td></tr>`;
         });
         html += '</table>';
         return html;
     }
 
     applyPreset(preset) {
-        // Applies auto-enhancement presets
+        // Applies auto-enhancement presets (single pipeline pass, undoable)
         if (!this.originalImage) return;
-
-        this.resetAdjustments();
 
         const presets = {
             auto: { brightness: 10, contrast: 15, saturation: 10, sharpen: 15, gamma: 1.1 },
@@ -1209,27 +1942,52 @@ class ImageForensicsTool {
         const settings = presets[preset];
         if (!settings) return;
 
-        this.enhancements.brightness = settings.brightness ?? 0;
-        this.enhancements.contrast = settings.contrast ?? 0;
-        this.enhancements.saturation = settings.saturation ?? 0;
-        this.enhancements.sharpen = settings.sharpen ?? 0;
-        this.enhancements.gamma = settings.gamma ?? 1.0;
+        const prev = { ...this.enhancements };
+        const apply = () => {
+            this.enhancements.brightness = settings.brightness ?? 0;
+            this.enhancements.contrast = settings.contrast ?? 0;
+            this.enhancements.saturation = settings.saturation ?? 0;
+            this.enhancements.sharpen = settings.sharpen ?? 0;
+            this.enhancements.gamma = settings.gamma ?? 1.0;
+            this.syncEnhancementSliders();
+            document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelector(`[data-preset="${preset}"]`)?.classList.add('active');
+            this.applyEnhancements();
+        };
 
-        document.getElementById('brightness').value = this.enhancements.brightness;
-        document.getElementById('brightness').parentElement.querySelector('.value').textContent = this.enhancements.brightness;
-        document.getElementById('contrast').value = this.enhancements.contrast;
-        document.getElementById('contrast').parentElement.querySelector('.value').textContent = this.enhancements.contrast;
-        document.getElementById('saturation').value = this.enhancements.saturation;
-        document.getElementById('saturation').parentElement.querySelector('.value').textContent = this.enhancements.saturation;
-        document.getElementById('sharpen').value = this.enhancements.sharpen;
-        document.getElementById('sharpen').parentElement.querySelector('.value').textContent = this.enhancements.sharpen;
-        document.getElementById('gamma').value = this.enhancements.gamma * 100;
-        document.getElementById('gamma').parentElement.querySelector('.value').textContent = this.enhancements.gamma.toFixed(2);
+        apply();
 
-        document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
-        document.querySelector(`[data-preset="${preset}"]`)?.classList.add('active');
+        this.history.push({
+            label: 'Preset: ' + preset,
+            undo: () => {
+                this.enhancements = { ...prev };
+                this.syncEnhancementSliders();
+                document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+                this.applyEnhancements();
+            },
+            redo: apply
+        });
+    }
 
-        this.applyEnhancements();
+    syncEnhancementSliders() {
+        // Mirrors current enhancement state into the slider UI
+        const set = (id, value, text) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.value = value;
+            const v = el.parentElement.querySelector('.value');
+            if (v) v.textContent = text !== undefined ? text : String(value);
+        };
+        set('brightness', this.enhancements.brightness);
+        set('contrast', this.enhancements.contrast);
+        set('saturation', this.enhancements.saturation);
+        set('sharpen', this.enhancements.sharpen);
+        set('gamma', this.enhancements.gamma * 100, this.enhancements.gamma.toFixed(2));
+        set('sharpenRadius', this.enhancements.sharpenRadius, this.enhancements.sharpenRadius + 'px');
+        set('sharpenThreshold', this.enhancements.sharpenThreshold);
+        set('balanceR', this.enhancements.balanceR);
+        set('balanceG', this.enhancements.balanceG);
+        set('balanceB', this.enhancements.balanceB);
     }
 
     initPanelResize() {
@@ -1285,6 +2043,11 @@ class ImageForensicsTool {
 
                 const btn = document.getElementById('toggleSidebar');
                 if (btn) btn.classList.toggle('active', !panel.classList.contains('collapsed'));
+
+                if (!panel.classList.contains('collapsed')) {
+                    this.prefs.panelWidth = panel.offsetWidth;
+                    savePrefs(this.prefs);
+                }
             }
         });
 
@@ -1292,6 +2055,8 @@ class ImageForensicsTool {
             if (panel.classList.contains('collapsed')) {
                 panel.classList.remove('collapsed');
                 panel.style.width = defaultWidth + 'px';
+                this.prefs.panelWidth = defaultWidth;
+                savePrefs(this.prefs);
             } else {
                 panel.classList.add('collapsed');
                 panel.style.width = '';
@@ -1341,13 +2106,13 @@ class ImageForensicsTool {
     applyWatermark() {
         // Stores watermark settings and draws to overlay canvas
         if (!this.originalImage) {
-            alert('Please load an image first.');
+            showToast('Please load an image first.', 'warning');
             return;
         }
 
         const text = document.getElementById('watermarkText')?.value.trim();
         if (!text) {
-            alert('Please enter watermark text.');
+            showToast('Please enter watermark text.', 'warning');
             return;
         }
 
@@ -1373,13 +2138,13 @@ class ImageForensicsTool {
     applyCaption() {
         // Stores caption settings and draws to overlay canvas
         if (!this.originalImage) {
-            alert('Please load an image first.');
+            showToast('Please load an image first.', 'warning');
             return;
         }
 
         const text = document.getElementById('captionText')?.value.trim();
         if (!text) {
-            alert('Please enter caption text.');
+            showToast('Please enter caption text.', 'warning');
             return;
         }
 
@@ -1508,7 +2273,7 @@ class ImageForensicsTool {
             if (!response.ok) throw new Error('Failed to fetch');
             const blob = await response.blob();
             if (!blob.type.startsWith('image/')) throw new Error('Not an image');
-            this.loadImageFromBlob(blob);
+            this.loadImageFromBlob(blob, 'URL: ' + url);
             input.value = '';
         } catch {
             try {
@@ -1516,10 +2281,10 @@ class ImageForensicsTool {
                 const response = await fetch(proxyUrl);
                 if (!response.ok) throw new Error('Proxy failed');
                 const blob = await response.blob();
-                this.loadImageFromBlob(blob);
+                this.loadImageFromBlob(blob, 'URL (via proxy): ' + url);
                 input.value = '';
             } catch {
-                alert('Could not load image from URL. The server may block cross-origin requests.');
+                showToast('Could not load image from URL. The server may block cross-origin requests.', 'error', 5000);
             }
         } finally {
             if (span) span.textContent = 'URL';
@@ -1529,7 +2294,7 @@ class ImageForensicsTool {
     async reverseImageSearch(engine) {
         // Copies image to clipboard and opens reverse image search engine
         if (!this.originalImage) {
-            alert('Please load an image first.');
+            showToast('Please load an image first.', 'warning');
             return;
         }
 
@@ -1540,10 +2305,10 @@ class ImageForensicsTool {
         } catch {}
 
         const urls = {
-            google: 'https://images.google.com/',
+            google: 'https://lens.google.com/',
             yandex: 'https://yandex.com/images/',
             tineye: 'https://tineye.com/',
-            bing: 'https://www.bing.com/images/search?q=&FORM=SBIIRP'
+            bing: 'https://www.bing.com/visualsearch'
         };
 
         const btn = document.getElementById('search' + engine.charAt(0).toUpperCase() + engine.slice(1));
@@ -1563,7 +2328,7 @@ class ImageForensicsTool {
     async runOCR() {
         // Runs Tesseract.js OCR on the current image with progress tracking
         if (!this.originalImage) {
-            alert('Please load an image first.');
+            showToast('Please load an image first.', 'warning');
             return;
         }
 
