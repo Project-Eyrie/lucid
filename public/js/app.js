@@ -2009,7 +2009,11 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         document.getElementById('splitBtn')?.classList.remove('active');
         this.cancelOcrRegionSelect(true);
         this.cancelPerspective();
-        this.reportMeta = null;
+        // NOTE: this.reportMeta is deliberately NOT cleared here.
+        // resetForNewImage() runs from img.onload, which races the
+        // already-in-flight extractEXIF for the same file; nulling the
+        // snapshot mid-extraction crashed metadata display whenever the
+        // image decoded before the (slow) exifr parse resolved.
         document.getElementById('exitEla')?.classList.add('hidden');
         document.getElementById('srOcrBtn')?.classList.add('hidden');
         this.history.clear();
@@ -2242,8 +2246,11 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             ` <button class="copy-meta-btn" data-copy="${escapeHtml(imageHash)}" title="Copy hash">COPY</button></td></tr>`;
         html += '</table></div>';
 
-        // Structured capture for the case report exporter
-        this.reportMeta = {
+        // Structured capture for the case report exporter. Built as a
+        // local and published to the instance; later writes go through
+        // the local reference so concurrent resets can never null it
+        // out from under this async function.
+        const meta = {
             sourceLabel: sourceLabel || null,
             fileName: file.name || null,
             fileSize: file.size,
@@ -2253,6 +2260,7 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             exif: null,
             parseError: null
         };
+        this.reportMeta = meta;
 
         let exifData = null;
         let parseError = null;
@@ -2270,8 +2278,8 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
             parseError = err;
             console.error('EXIF parse error:', err);
         }
-        this.reportMeta.exif = exifData;
-        this.reportMeta.parseError = parseError?.message || null;
+        meta.exif = exifData;
+        meta.parseError = parseError?.message || null;
 
         if (exifData && Object.keys(exifData).length > 0) {
             const cameraFields = ['Make', 'Model', 'LensModel', 'Software'];

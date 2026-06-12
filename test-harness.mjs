@@ -124,8 +124,12 @@ Object.defineProperty(globalThis, 'navigator', {
 globalThis.CustomEvent = class { constructor(type, opts) { this.type = type; this.detail = opts?.detail; } };
 globalThis.ImageData = class { constructor(w, h) { this.width = w; this.height = h; this.data = new Uint8ClampedArray(w * h * 4); } };
 globalThis.Image = class {
+    // Decode completes at ~10ms: AFTER extractEXIF has created its
+    // metadata snapshot (~1ms) but BEFORE the slow exifr parse resolves
+    // (~25ms) — the exact interleaving real browsers produce, where
+    // resetForNewImage() runs mid-extraction
     constructor() { this.width = 400; this.height = 300; }
-    set src(v) { this._src = v; queueMicrotask(() => this.onload && this.onload()); }
+    set src(v) { this._src = v; setTimeout(() => this.onload && this.onload(), 10); }
     get src() { return this._src; }
 };
 globalThis.FileReader = class {
@@ -141,7 +145,9 @@ globalThis.exifr = {
     // Closer to real exifr output: dates, numbers, GPS, nested objects,
     // typed arrays (ICC-style), and odd values that must not break the
     // raw-dump renderer
-    parse: async () => ({
+    parse: async () => {
+        await new Promise(r => setTimeout(r, 25)); // real parses are slow
+        return ({
         Make: 'TestCam', Model: 'X1', Software: '<img src=x onerror=alert(1)>',
         DateTimeOriginal: new Date('2024-01-01'), CreateDate: new Date('2024-01-01'),
         ExposureTime: 0.008, FNumber: 1.8, ISO: 100, Orientation: 'Horizontal (normal)',
@@ -149,7 +155,8 @@ globalThis.exifr = {
         ApplicationNotes: new Uint8Array([1, 2, 3]),
         nested: { deep: true },
         weird: null
-    }),
+    });
+    },
     thumbnail: async () => null
 };
 globalThis.Blob = globalThis.Blob || class { constructor(parts) { this.parts = parts; } };
@@ -188,8 +195,8 @@ const run = async () => {
     imageInput.files = [fakeFile];
     imageInput.dispatch('change', { target: imageInput });
 
-    // let async extractEXIF settle
-    await new Promise(r => setTimeout(r, 50));
+    // let async extractEXIF settle (slow stub parse + hash)
+    await new Promise(r => setTimeout(r, 300));
 
     const exifHtml = doc.getElementById('exifContent').innerHTML;
     const checks = [
