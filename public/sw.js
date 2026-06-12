@@ -9,8 +9,12 @@
  * property when handling evidence images.
  */
 
-const SHELL_CACHE = 'lucid-shell-v1';
-const RUNTIME_CACHE = 'lucid-runtime-v1';
+// Bump VERSION on every release: activation deletes all older
+// versioned caches, so a deployed update can never be masked by a
+// stale shell (the model cache is version-independent and preserved).
+const VERSION = 'v2';
+const SHELL_CACHE = 'lucid-shell-' + VERSION;
+const RUNTIME_CACHE = 'lucid-runtime-' + VERSION;
 
 const SHELL_ASSETS = [
     './',
@@ -73,16 +77,19 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(req.url);
 
     if (url.origin === self.location.origin) {
-        // App shell: cache-first, falling back to network, refreshing
-        // the cache on successful network responses
+        // App shell: NETWORK-FIRST. Fresh code always wins when online
+        // (cache is refreshed from the response); the cache only serves
+        // when the network is unavailable — i.e. true offline mode.
+        // Cache-first here previously caused updates to be masked by a
+        // stale shell, which is unacceptable for an evidence tool.
         event.respondWith(
-            caches.match(req).then(hit => hit || fetch(req).then(resp => {
+            fetch(req).then(resp => {
                 if (resp.ok) {
                     const clone = resp.clone();
                     caches.open(SHELL_CACHE).then(c => c.put(req, clone));
                 }
                 return resp;
-            }))
+            }).catch(() => caches.match(req))
         );
         return;
     }

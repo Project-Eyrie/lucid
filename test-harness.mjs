@@ -138,7 +138,18 @@ globalThis.Tesseract = {
     })
 };
 globalThis.exifr = {
-    parse: async () => ({ Make: 'TestCam', Model: 'X1', DateTimeOriginal: new Date('2024-01-01') }),
+    // Closer to real exifr output: dates, numbers, GPS, nested objects,
+    // typed arrays (ICC-style), and odd values that must not break the
+    // raw-dump renderer
+    parse: async () => ({
+        Make: 'TestCam', Model: 'X1', Software: '<img src=x onerror=alert(1)>',
+        DateTimeOriginal: new Date('2024-01-01'), CreateDate: new Date('2024-01-01'),
+        ExposureTime: 0.008, FNumber: 1.8, ISO: 100, Orientation: 'Horizontal (normal)',
+        latitude: -33.8688, longitude: 151.2093, GPSAltitude: 58.2,
+        ApplicationNotes: new Uint8Array([1, 2, 3]),
+        nested: { deep: true },
+        weird: null
+    }),
     thumbnail: async () => null
 };
 globalThis.Blob = globalThis.Blob || class { constructor(parts) { this.parts = parts; } };
@@ -160,9 +171,18 @@ const run = async () => {
     }
 
     // ---- flow 1: load an image, expect metadata to populate ----
+    // Use REAL JPEG bytes so the real parseJPEGInternals path runs —
+    // a dummy buffer previously hid that entire code path from testing
+    const fs = await import('fs');
+    let jpegBytes;
+    try {
+        jpegBytes = fs.readFileSync(new URL('./test-fixture.jpg', import.meta.url));
+    } catch {
+        jpegBytes = Buffer.alloc(16); // fixture missing: degrade gracefully
+    }
     const fakeFile = {
-        name: 'evidence.jpg', size: 1234, type: 'image/jpeg', lastModified: Date.now(),
-        arrayBuffer: async () => new ArrayBuffer(16)
+        name: 'evidence.jpg', size: jpegBytes.length, type: 'image/jpeg', lastModified: Date.now(),
+        arrayBuffer: async () => jpegBytes.buffer.slice(jpegBytes.byteOffset, jpegBytes.byteOffset + jpegBytes.byteLength)
     };
     const imageInput = doc.getElementById('imageUpload');
     imageInput.files = [fakeFile];
@@ -172,10 +192,21 @@ const run = async () => {
     await new Promise(r => setTimeout(r, 50));
 
     const exifHtml = doc.getElementById('exifContent').innerHTML;
-    if (exifHtml.includes('TestCam')) {
-        console.log('METADATA FLOW OK — panel contains parsed EXIF');
+    const checks = [
+        ['parsed EXIF (Make)', exifHtml.includes('TestCam')],
+        ['XSS escaped', !exifHtml.includes('<img src=x') && exifHtml.includes('&lt;img')],
+        ['GPS section', exifHtml.includes('-33.868800')],
+        ['JPEG internals (quant tables)', exifHtml.includes('JPEG INTERNALS') && exifHtml.includes('quant-table')],
+        ['quality estimate', exifHtml.includes('Est. quality')],
+        ['SHA-256 present', exifHtml.includes('SHA-256')],
+        ['no error panel', !exifHtml.includes('METADATA ERROR')]
+    ];
+    const bad = checks.filter(([, ok]) => !ok);
+    if (bad.length === 0) {
+        console.log('METADATA FLOW OK — all ' + checks.length + ' content checks pass');
     } else {
-        failures.push('METADATA FLOW FAILED — exifContent.innerHTML = ' + JSON.stringify(exifHtml).slice(0, 300));
+        failures.push('METADATA FLOW FAILED — checks failed: ' + bad.map(([n]) => n).join(', ') +
+            '\n  innerHTML: ' + JSON.stringify(exifHtml).slice(0, 400));
     }
 
     // ---- flow 2: split compare drag ----

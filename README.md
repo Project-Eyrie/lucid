@@ -22,10 +22,16 @@
 
 ## Features
 
-- **Real-time Enhancement** — Brightness, contrast, saturation, gamma, color balance, interactive curves editor, and six auto-enhancement presets
-- **Forensic Filters** — Edge detection, emboss, histogram equalization, grayscale, invert, and denoise
+- **Real-time Enhancement** — Brightness, contrast, saturation, gamma, color balance, interactive curves editor, Gaussian unsharp mask with radius/threshold control, and nine presets — four of which (Smart Auto, Auto Levels, Auto Color, Low Light) are adaptive, computing their values from the image histogram and writing them into the sliders for full auditability
+- **Forensic Filters** — CLAHE (contrast-limited adaptive equalization), auto white balance, dehaze (dark channel prior), edge detection, emboss, histogram equalization, grayscale, invert, and denoise
+- **Forensic Analysis** — Error Level Analysis (ELA) for manipulation screening, JPEG quantization-table fingerprinting with estimated encoder quality, and embedded EXIF thumbnail comparison
+- **Perspective Correction** — Click four corners of a document, screen, or plate photographed at an angle and warp it flat
+- **ML Super-Resolution** — Neural upscaling in-browser via ONNX Runtime Web with WebGPU acceleration (WASM fallback, worker-proxied so the UI never blocks): a built-in 3x Sub-Pixel CNN, the recommended RealESR-general 4x compact (~5 MB), Real-ESRGAN x4plus (~67 MB) — all SHA-256-verified, cached locally for offline reuse, and savable to disk — or load your own `.onnx`. A dedicated TEXT & PLATES mode wraps the model in denoise → SR → iterative back-projection → stroke-tuned sharpening; optional double-pass for tiny crops and an x8 self-ensemble for maximum quality. After upscaling, a split-slider shows a direct neural-vs-bicubic A/B
+- **Case Report Export** — One click produces a self-contained HTML report: SHA-256 of the source file and working render, original and processed images, the complete processing audit trail, active settings, and extracted metadata. Archivable alongside the evidence and printable to PDF
+- **Offline / PWA** — A service worker caches the app shell, CDN libraries, OCR language data, and downloaded models: after one online session, Lucid runs with the network unplugged. Set `LUCID_THREADS=1` on the server to enable cross-origin isolation for multithreaded WASM (~4-8x faster CPU inference; disables the inline GPS map embed)
 - **Annotation Tools** — Draw shapes, arrows, text labels, blur sensitive regions, and measure pixel distances
-- **Metadata & OSINT** — EXIF extraction, SHA-256 hashing, GPS mapping, OCR text extraction, and reverse image search via Google Lens, Yandex, TinEye, and Bing
+- **Unified Undo/Redo** — Every operation (annotations, blurs, filters, crops, warps, presets) on a single chronological history with a session audit trail
+- **Metadata & OSINT** — Full EXIF/IPTC/ICC/XMP extraction (JPEG, PNG, TIFF, HEIC), SHA-256 hashing, GPS mapping with inline OpenStreetMap embed, raw tag dump, OCR text extraction, reverse image search via Google Lens, Yandex, TinEye, and Bing, and region OCR (drag a box to read just a plate or sign)
 
 ---
 
@@ -51,10 +57,16 @@ Load an image via file upload, clipboard paste, or URL. The main canvas displays
 | `A` | Toggle annotation visibility |
 | `M` | Toggle magnifier |
 | `P` | Activate color picker |
+| `R` / `C` / `B` / `T` / `L` / `U` | Select tool: Rect / Circle / Blur / Text / Line / Measure |
+| `Esc` | Deselect tool / cancel perspective correction |
 | `Space + Drag` | Pan when zoomed |
-| `Ctrl+Z` | Undo last annotation or blur |
+| `\` (hold) | Compare with the unmodified original |
+| `Ctrl+Z` | Undo last operation |
+| `Ctrl+Shift+Z` | Redo |
 | `Ctrl+V` | Paste image from clipboard |
-| `Scroll` | Zoom in/out |
+| `Scroll` | Zoom toward cursor |
+
+You can also drag and drop an image file directly onto the canvas to load it.
 
 > On macOS, substitute `Ctrl` with `Cmd`.
 

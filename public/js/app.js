@@ -2193,11 +2193,25 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
     }
 
     async extractEXIF(file, sourceLabel = null) {
+        // Wrapper: metadata extraction must never fail silently. Any
+        // uncaught error is rendered into the panel (and the console)
+        // instead of leaving the default "No image loaded" placeholder.
+        const el = document.getElementById('exifContent');
+        try {
+            await this.extractEXIFInner(el, file, sourceLabel);
+        } catch (err) {
+            console.error('Metadata extraction failed:', err);
+            el.innerHTML = '<div class="meta-section"><h4>METADATA ERROR</h4>' +
+                `<p class="no-data">Extraction failed: ${escapeHtml(err?.message || String(err))}</p>` +
+                '<p class="no-data">Please report this — the file itself may still be valid.</p></div>';
+        }
+    }
+
+    async extractEXIFInner(el, file, sourceLabel = null) {
         // Extracts and displays file metadata, hash, EXIF data, JPEG
         // internals (quantization tables), and the embedded thumbnail.
         // All values are HTML-escaped: EXIF strings are attacker-
         // controllable, and unescaped innerHTML here was an XSS vector.
-        const el = document.getElementById('exifContent');
         let html = '';
 
         let arrayBuffer = null;
@@ -2323,6 +2337,7 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
         }
 
         // JPEG internals: quantization tables fingerprint the encoder
+        try {
         if (arrayBuffer) {
             const jpeg = parseJPEGInternals(arrayBuffer);
             if (jpeg && jpeg.quantTables.length > 0) {
@@ -2344,6 +2359,10 @@ ${exifRows ? `<table><tr><th>Field</th><th>Value</th></tr>${gps}${exifRows}</tab
                 });
                 html += '</div>';
             }
+        }
+        } catch (err) {
+            console.error('JPEG internals parse failed:', err);
+            html += '<div class="meta-section"><h4>JPEG INTERNALS</h4><p class="no-data">Could not parse JPEG structure</p></div>';
         }
 
         el.innerHTML = html;
